@@ -115,8 +115,8 @@ mutable struct Worker
 
     function Worker(id::Int, r_stream::IO, w_stream::IO, manager::ClusterManager;
                              version::Union{VersionNumber, Nothing}=nothing,
-                             config::WorkerConfig=WorkerConfig())
-        w = Worker(id)
+                             config::WorkerConfig=WorkerConfig(), role= :default)
+        w = Worker(id; role = role)
         w.r_stream = r_stream
         w.w_stream = buffer_writes(w_stream)
         w.w_serializer = ClusterSerializer(w.w_stream)
@@ -128,56 +128,60 @@ mutable struct Worker
         w
     end
 
-    Worker(id::Int) = Worker(id, nothing)
-    function Worker(id::Int, conn_func)
+    Worker(id::Int; role= :default) = Worker(id, nothing; role = role)
+    function Worker(id::Int, conn_func; role= :default)
         @assert id > 0
+        map_pid_wrkr = Map_pid_wrkr(role = role)
         if haskey(map_pid_wrkr, id)
             return map_pid_wrkr[id]
         end
         w=new(id, Threads.ReentrantLock(), [], [], false, W_CREATED, Condition(), time(), conn_func)
         w.initialized = Event()
-        register_worker(w)
+        register_worker(w; role = role)
         w
     end
 
-    Worker() = Worker(get_next_pid())
+    Worker(;role= :default) = Worker(get_next_pid(); role = role)
 end
+
+wid(w::Worker; role= :default) = w.id
 
 function set_worker_state(w, state)
     w.state = state
     notify(w.c_state; all=true)
 end
 
-function check_worker_state(w::Worker)
+function check_worker_state(w::Worker; role= :default)
     if w.state === W_CREATED
-        if !isclusterlazy()
-            if PGRP.topology === :all_to_all
+        if !isclusterlazy(role = role)
+            pg = PGRP(role = role)
+            if pg.topology === :all_to_all
                 # Since higher pids connect with lower pids, the remote worker
                 # may not have connected to us yet. Wait for some time.
-                wait_for_conn(w)
+                wait_for_conn(w; role=role)
             else
-                error("peer $(w.id) is not connected to $(myid()). Topology : " * string(PGRP.topology))
+                error("peer $(wid(w, role=role)) is not connected to $(myid(role=role)). Topology : " * string(pg.topology))
             end
         else
             w.ct_time = time()
-            if myid() > w.id
-                t = @async exec_conn_func(w)
+            if myid(role=role) > wid(w, role=role)
+                t = @async exec_conn_func(w; role=role)
             else
                 # route request via node 1
-                t = @async remotecall_fetch((p,to_id) -> remotecall_fetch(exec_conn_func, p, to_id), 1, w.id, myid())
+                t = @async remotecall_fetch((p,to_id) -> remotecall_fetch((to_id, role) -> exec_conn_func(to_id, role = role), p, to_id, p == 1 ? :manager : :worker; role = role), 1, wid(w, role=role), myid(role=role))
             end
             errormonitor(t)
-            wait_for_conn(w)
+            wait_for_conn(w; role=role)
         end
     end
 end
 
-exec_conn_func(id::Int) = exec_conn_func(worker_from_id(id)::Worker)
-function exec_conn_func(w::Worker)
+exec_conn_func(id::Int; role= :default) = exec_conn_func(worker_from_id(id; role = role)::Worker; role = role)
+function exec_conn_func(w::Worker; role= :default)
     try
         f = notnothing(w.conn_func)
         # Will be called if some other task tries to connect at the same time.
-        w.conn_func = () -> wait_for_conn(w)
+        w.conn_func = () -> wait_for_conn(w; role=role)
         f()
     catch e
         w.conn_func = () -> throw(e)
@@ -186,14 +190,14 @@ function exec_conn_func(w::Worker)
     nothing
 end
 
-function wait_for_conn(w)
+function wait_for_conn(w; role=:defaut)
     if w.state === W_CREATED
         timeout =  worker_timeout() - (time() - w.ct_time)
-        timeout <= 0 && error("peer $(w.id) has not connected to $(myid())")
+        timeout <= 0 && error("peer $(wid(w, role=role)) has not connected to $(myid(role=role))")
 
         @async (sleep(timeout); notify(w.c_state; all=true))
         wait(w.c_state)
-        w.state === W_CREATED && error("peer $(w.id) didn't connect to $(myid()) within $timeout seconds")
+        w.state === W_CREATED && error("peer $(wid(w, role=role)) didn't connect to $(myid(role=role)) within $timeout seconds")
     end
     nothing
 end
@@ -201,11 +205,28 @@ end
 ## process group creation ##
 
 mutable struct LocalProcess
-    id::Int
+    id0::Int
+    id1::Int
     bind_addr::String
     bind_port::UInt16
     cookie::String
-    LocalProcess() = new(1)
+    LocalProcess() = new(1,1)
+end
+
+function wid(lp::LocalProcess; role= :default) 
+    if role == :manager 
+        return lp.id1
+    elseif role == :worker 
+        return lp.id0
+    elseif role == :default && myrole() == :master
+        return lp.id1 # as :manager
+    elseif role == :default && myrole() == :worker
+        return lp.id0 # as :worker
+    else
+        return lp.id1 # as :manager
+        #throw("unexpected use of role=:default (wid)")
+    end
+
 end
 
 worker_timeout() = parse(Float64, get(ENV, "JULIA_WORKER_TIMEOUT", "60.0"))
@@ -230,6 +251,7 @@ It does not return.
 """
 start_worker(cookie::AbstractString=readline(stdin); kwargs...) = start_worker(stdout, cookie; kwargs...)
 function start_worker(out::IO, cookie::AbstractString=readline(stdin); close_stdin::Bool=true, stderr_to_stdout::Bool=true)
+
     init_multi()
 
     if close_stdin # workers will not use it
@@ -249,12 +271,9 @@ function start_worker(out::IO, cookie::AbstractString=readline(stdin); close_std
     end
     errormonitor(@async while isopen(sock)
         client = accept(sock)
-        process_messages(client, client, true)
+        process_messages(client, client, true; role = :worker)
     end)
-    print(out, "julia_worker:")  # print header
-    print(out, "$(string(LPROC.bind_port))#") # print port
-    print(out, LPROC.bind_addr)
-    print(out, '\n')
+    println(out, "julia_worker:$(string(LPROC.bind_port))#$(LPROC.bind_addr)\n")  # print header
     flush(out)
 
     Sockets.nagle(sock, false)
@@ -270,7 +289,7 @@ function start_worker(out::IO, cookie::AbstractString=readline(stdin); close_std
         check_master_connect()
         while true; wait(); end
     catch err
-        print(stderr, "unhandled exception on $(myid()): $(err)\nexiting.\n")
+        print(stderr, "unhandled exception on $(myid(role = :worker)): $(err)\nexiting.\n")
     end
 
     close(sock)
@@ -379,12 +398,12 @@ function init_worker(cookie::AbstractString, manager::ClusterManager=DefaultClus
 
     # Since our pid has yet to be set, ensure no RemoteChannel / Future  have been created or addprocs() called.
     @assert nprocs() <= 1
-    @assert isempty(PGRP.refs)
+    @assert isempty(PGRP(role = :worker).refs)
     @assert isempty(client_refs)
 
     # System is started in head node mode, cleanup related entries
-    empty!(PGRP.workers)
-    empty!(map_pid_wrkr)
+    empty!(PGRP(role = :worker).workers)
+    empty!(Map_pid_wrkr(role = :worker))
 
     cluster_cookie(cookie)
     nothing
@@ -443,10 +462,16 @@ end
 function addprocs(manager::ClusterManager; kwargs...)
     init_multi()
 
-    cluster_mgmt_from_master_check()
+#    cluster_mgmt_from_master_check()
 
     lock(worker_lock)
     try
+
+        if myrole() == :worker
+            myrole!(:manager_worker)
+        end
+        PGRP(role=:manager).level = PGRP(role=:worker).level + 1
+
         addprocs_locked(manager::ClusterManager; kwargs...)
     finally
         unlock(worker_lock)
@@ -455,16 +480,18 @@ end
 
 function addprocs_locked(manager::ClusterManager; kwargs...)
     params = merge(default_addprocs_params(manager), Dict{Symbol,Any}(kwargs))
-    topology(Symbol(params[:topology]))
+    topology(Symbol(params[:topology]); role = :manager)
 
-    if PGRP.topology !== :all_to_all
+    pgm = PGRP(role = :manager) 
+
+    if pgm.topology !== :all_to_all
         params[:lazy] = false
     end
 
-    if PGRP.lazy === nothing || nprocs() == 1
-        PGRP.lazy = params[:lazy]
-    elseif isclusterlazy() != params[:lazy]
-        throw(ArgumentError(string("Active workers with lazy=", isclusterlazy(),
+    if pgm.lazy === nothing || nprocs() == 1
+        pgm.lazy = params[:lazy]
+    elseif isclusterlazy(role = :manager) != params[:lazy]
+        throw(ArgumentError(string("Active workers with lazy=", isclusterlazy(role = :manager),
                                     ". Cannot set lazy=", params[:lazy])))
     end
 
@@ -509,17 +536,17 @@ function addprocs_locked(manager::ClusterManager; kwargs...)
     # Since all worker-to-worker setups may not have completed by the time this
     # function returns to the caller, send the complete list to all workers.
     # Useful for nprocs(), nworkers(), etc to return valid values on the workers.
-    all_w = workers()
+    all_w = workers(role = :manager)
     for pid in all_w
-        remote_do(set_valid_processes, pid, all_w)
+        remote_do((all_w, role) -> set_valid_processes(all_w, role = role), pid, all_w, pid == 1 ? :manager : :worker; role = :manager)
     end
 
     sort!(launched_q)
 end
 
-function set_valid_processes(plist::Array{Int})
+function set_valid_processes(plist::Array{Int}; role= :default)
     for pid in setdiff(plist, workers())
-        myid() != pid && Worker(pid)
+        myid(role=role) != pid && Worker(pid; role = role)
     end
 end
 
@@ -566,7 +593,7 @@ function launch_n_additional_processes(manager, frompid, fromconfig, cnt, launch
         exeflags = something(fromconfig.exeflags, ``)
         cmd = `$exename $exeflags`
 
-        new_addresses = remotecall_fetch(launch_additional, frompid, cnt, cmd)
+        new_addresses = remotecall_fetch(launch_additional, frompid, cnt, cmd; role = :manager)
         for address in new_addresses
             (bind_addr, port) = address
 
@@ -580,7 +607,7 @@ function launch_n_additional_processes(manager, frompid, fromconfig, cnt, launch
             let wconfig=wconfig
                 @async begin
                     pid = create_worker(manager, wconfig)
-                    remote_do(redirect_output_from_additional_worker, frompid, pid, port)
+                    remote_do(redirect_output_from_additional_worker, frompid, pid, port; role = :manager)
                     push!(launched_q, pid)
                 end
             end
@@ -589,40 +616,42 @@ function launch_n_additional_processes(manager, frompid, fromconfig, cnt, launch
 end
 
 function create_worker(manager, wconfig)
+    role = :manager
+
     # only node 1 can add new nodes, since nobody else has the full list of address:port
-    @assert LPROC.id == 1
+    @assert myid(role=role) == 1
     timeout = worker_timeout()
 
     # initiate a connect. Does not wait for connection completion in case of TCP.
-    w = Worker()
+    w = Worker(role = role)
     local r_s, w_s
     try
-        (r_s, w_s) = connect(manager, w.id, wconfig)
+        (r_s, w_s) = connect(manager, wid(w, role=role), wconfig)
     catch ex
         try
-            deregister_worker(w.id)
-            kill(manager, w.id, wconfig)
+            deregister_worker(wid(w, role=role), role = role)
+            kill(manager, wid(w, role=role), wconfig)
         finally
             rethrow(ex)
         end
     end
 
-    w = Worker(w.id, r_s, w_s, manager; config=wconfig)
+    w = Worker(wid(w, role=role), r_s, w_s, manager; config=wconfig, role = role)
     # install a finalizer to perform cleanup if necessary
     finalizer(w) do w
-        if myid() == 1
-            manage(w.manager, w.id, w.config, :finalize)
+        if myid(role=role) == 1
+            manage(w.manager, wid(w, role=role), w.config, :finalize)
         end
     end
 
     # set when the new worker has finished connections with all other workers
-    ntfy_oid = RRID()
-    rr_ntfy_join = lookup_ref(ntfy_oid)
-    rr_ntfy_join.waitingfor = myid()
+    ntfy_oid = RRID(role = role)
+    rr_ntfy_join = lookup_ref(ntfy_oid; role = role)
+    rr_ntfy_join.waitingfor = myid(role=role)
 
     # Start a new task to handle inbound messages from connected worker in master.
     # Also calls `wait_connected` on TCP streams.
-    process_messages(w.r_stream, w.w_stream, false)
+    process_messages(w.r_stream, w.w_stream, false; role = :manager)
 
     # send address information of all workers to the new worker.
     # Cluster managers set the address of each worker in `WorkerConfig.connect_at`.
@@ -639,23 +668,24 @@ function create_worker(manager, wconfig)
     # - On master, receiving a JoinCompleteMsg triggers rr_ntfy_join (signifies that worker setup is complete)
 
     join_list = []
-    if PGRP.topology === :all_to_all
+    pgm = PGRP(role = role)
+    if pgm.topology === :all_to_all
         # need to wait for lower worker pids to have completed connecting, since the numerical value
         # of pids is relevant to the connection process, i.e., higher pids connect to lower pids and they
         # require the value of config.connect_at which is set only upon connection completion
-        for jw in PGRP.workers
-            if (jw.id != 1) && (jw.id < w.id)
+        for jw in pgm.workers
+            if (wid(jw, role=role) != 1) && (wid(jw, role=role) < wid(w, role=role))
                 (jw.state === W_CREATED) && wait(jw.c_state)
                 push!(join_list, jw)
             end
         end
 
-    elseif PGRP.topology === :custom
+    elseif pgm.topology === :custom
         # wait for requested workers to be up before connecting to them.
-        filterfunc(x) = (x.id != 1) && isdefined(x, :config) &&
+        filterfunc(x) = (wid(x, role=role) != 1) && isdefined(x, :config) &&
             (notnothing(x.config.ident) in something(wconfig.connect_idents, []))
 
-        wlist = filter(filterfunc, PGRP.workers)
+        wlist = filter(filterfunc, pgm.workers)
         waittime = 0
         while wconfig.connect_idents !== nothing &&
               length(wlist) < length(wconfig.connect_idents)
@@ -664,7 +694,7 @@ function create_worker(manager, wconfig)
             end
             sleep(1.0)
             waittime += 1
-            wlist = filter(filterfunc, PGRP.workers)
+            wlist = filter(filterfunc, pgm.workers)
         end
 
         for wl in wlist
@@ -674,15 +704,15 @@ function create_worker(manager, wconfig)
     end
 
     all_locs = mapany(x -> isa(x, Worker) ?
-                      (something(x.config.connect_at, ()), x.id) :
-                      ((), x.id, true),
+                      (something(x.config.connect_at, ()), wid(x, role=role)) :
+                      ((), wid(x, role=role), true),
                       join_list)
     send_connection_hdr(w, true)
     enable_threaded_blas = something(wconfig.enable_threaded_blas, false)
-    join_message = JoinPGRPMsg(w.id, all_locs, PGRP.topology, enable_threaded_blas, isclusterlazy())
-    send_msg_now(w, MsgHeader(RRID(0,0), ntfy_oid), join_message)
+    join_message = JoinPGRPMsg(wid(w, role=role), all_locs, pgm.topology, enable_threaded_blas, isclusterlazy(role = role))
+    send_msg_now(w, MsgHeader(RRID(0,0), ntfy_oid), join_message; role = role)
 
-    @async manage(w.manager, w.id, w.config, :register)
+    @async manage(w.manager, wid(w, role=role), w.config, :register)
     # wait for rr_ntfy_join with timeout
     timedout = false
     @async (sleep($timeout); timedout = true; put!(rr_ntfy_join, 1))
@@ -691,10 +721,10 @@ function create_worker(manager, wconfig)
         error("worker did not connect within $timeout seconds")
     end
     lock(client_refs) do
-        delete!(PGRP.refs, ntfy_oid)
+        delete!(pgm.refs, ntfy_oid)
     end
 
-    return w.id
+    return wid(w, role=role)
 end
 
 
@@ -736,6 +766,7 @@ function check_master_connect()
         return
     end
     @async begin
+        map_pid_wrkr = Map_pid_wrkr(role = :worker)
         start = time_ns()
         while !haskey(map_pid_wrkr, 1) && (time_ns() - start) < timeout
             sleep(1.0)
@@ -784,34 +815,60 @@ let next_pid = 2    # 1 is reserved for the client (always)
 end
 
 mutable struct ProcessGroup
+    level::Integer
     name::String
     workers::Array{Any,1}
     refs::Dict{RRID,Any}                  # global references
     topology::Symbol
     lazy::Union{Bool, Nothing}
 
-    ProcessGroup(w::Array{Any,1}) = new("pg-default", w, Dict(), :all_to_all, nothing)
+    ProcessGroup(w::Array{Any,1}) = new(0, "pg-default", w, Dict(), :all_to_all, nothing)
 end
-const PGRP = ProcessGroup([])
 
-function topology(t)
-    @assert t in [:all_to_all, :master_worker, :custom]
-    if (PGRP.topology==t) || ((myid()==1) && (nprocs()==1)) || (myid() > 1)
-        PGRP.topology = t
+const _PGRP0 = ProcessGroup([])
+const _PGRP1 = ProcessGroup([])
+
+function PGRP(;role= :default)
+    if role == :manager 
+#        @info "$(role) / PGRP1 !"
+        return _PGRP1
+    elseif role == :worker 
+#        @info "$(role) / PGRP0 ! -- worker"
+        return _PGRP0
+#    elseif role == :default && _PGRP0.level == 0
+    elseif role == :default && myrole() == :master
+#        @info "$(role) / PGRP1 !"
+        return _PGRP1 # as :manager
+#    elseif role == :default && _PGRP0.level > 0
+    elseif role == :default && myrole() == :worker
+#        @info "$(role) / PGRP0 !"
+        return _PGRP0 # as :worker
     else
-        error("Workers with Topology $(PGRP.topology) already exist. Requested Topology $(t) cannot be set.")
+        return _PGRP1 # as :manager
+       # throw("unexpected use of role = $role (PGRP) - $(myrole())")
+    end
+end
+
+function topology(t; role= :default)
+    @assert t in [:all_to_all, :master_worker, :custom]
+    pg = PGRP(role = role)
+    if (pg.topology==t) || ((myid(role=role)==1) && (nprocs()==1)) || (myid(role=role) > 1)
+        pg.topology = t
+    else
+        error("Workers with Topology $(pg.topology) already exist. Requested Topology $(t) cannot be set.")
     end
     t
 end
 
-isclusterlazy() = something(PGRP.lazy, false)
+isclusterlazy(; role= :default) = something(PGRP(role = role).lazy, false)
 
-get_bind_addr(pid::Integer) = get_bind_addr(worker_from_id(pid))
-get_bind_addr(w::LocalProcess) = LPROC.bind_addr
-function get_bind_addr(w::Worker)
+get_bind_addr(pid::Integer) = get_bind_addr(worker_from_id(pid; role = :manager))  # always called as manager 
+get_bind_addr(w::LocalProcess) = LPROC.bind_addr                                   # always called as manager  
+function get_bind_addr(w::Worker)       
+    role = :worker                                           # always called as worker
     if w.config.bind_addr === nothing
-        if w.id != myid()
-            w.config.bind_addr = remotecall_fetch(get_bind_addr, w.id, w.id)
+        if wid(w, role=role) != myid(role=role)
+            w.config.bind_addr = remotecall_fetch(get_bind_addr, wid(w, role=role), wid(w, role=role), role = role)
         end
     end
     w.config.bind_addr
@@ -822,9 +879,32 @@ const LPROC = LocalProcess()
 const LPROCROLE = Ref{Symbol}(:master)
 const HDR_VERSION_LEN=16
 const HDR_COOKIE_LEN=16
-const map_pid_wrkr = Dict{Int, Union{Worker, LocalProcess}}()
+const _map_pid_wrkr_0 = Dict{Int, Union{Worker, LocalProcess}}()
+const _map_pid_wrkr_1 = Dict{Int, Union{Worker, LocalProcess}}()
 const map_sock_wrkr = IdDict()
 const map_del_wrkr = Set{Int}()
+
+function Map_pid_wrkr(;role= :default)
+   # @info ("_map_pid_wrkr_0", _map_pid_wrkr_0, "end")
+   # @info ("_map_pid_wrkr_1", _map_pid_wrkr_1, "end")
+    pg = PGRP(role = role)
+    if role == :manager 
+    #    @info "Map_pid_wrkr_1 ", role
+        return _map_pid_wrkr_1
+    elseif role == :worker 
+    #    @info "Map_pid_wrkr_0 ", role
+        return _map_pid_wrkr_0
+    elseif role == :default && myrole() == :master
+    #    @info "Map_pid_wrkr_1 ", role, pg.level
+        return _map_pid_wrkr_1 # as :manager
+    elseif role == :default && myrole() == :worker
+    #    @info "Map_pid_wrkr_0 ", role, pg.level
+        return _map_pid_wrkr_0 # as :worker
+    else
+        return _map_pid_wrkr_1 # as :manager
+       # throw("unexpected use of role = :default (Map_pid_wrkr)")
+   end    
+end
 
 # whether process is a master or worker in a distributed setup
 myrole() = LPROCROLE[]
@@ -847,7 +927,38 @@ julia> remotecall_fetch(() -> myid(), 4)
 4
 ```
 """
-myid() = LPROC.id
+function myid(;role= :default) 
+    if role == :manager 
+        return LPROC.id1
+    elseif role == :worker 
+        return LPROC.id0
+    elseif role == :default && myrole() == :master
+        return LPROC.id1 # as :manager
+    elseif role == :default && myrole() == :worker
+        return LPROC.id0 # as :worker
+    else
+        return LPROC.id1 # as :manager
+        #throw("unexpected use of role := default (myid) - $(myrole())")
+    end
+
+end
+
+function myid!(id;role= :default) 
+    if role == :manager 
+        LPROC.id1 = id
+    elseif role == :worker 
+        LPROC.id0 = id
+    elseif role == :default && myrole() == :master
+        LPROC.id1 = id # as :manager
+    elseif role == :default && myrole() == :worker
+        LPROC.id0 = id # as :worker
+    else
+        LPROC.id1 = id # as :manager
+        #throw("unexpected use of role := default (myid!)")
+    end
+
+end
+
 
 """
     nprocs()
@@ -865,18 +976,19 @@ julia> workers()
  3
 ```
 """
-function nprocs()
-    if myid() == 1 || (PGRP.topology === :all_to_all && !isclusterlazy())
-        n = length(PGRP.workers)
+function nprocs(; role= :default)
+    pg = PGRP(role = role)
+    if myid(role=role) == 1 || (pg.topology === :all_to_all && !isclusterlazy(role = role))
+        n = length(pg.workers)
         # filter out workers in the process of being setup/shutdown.
-        for jw in PGRP.workers
+        for jw in pg.workers
             if !isa(jw, LocalProcess) && (jw.state !== W_CONNECTED)
                 n = n - 1
             end
         end
         return n
     else
-        return length(PGRP.workers)
+        return length(pg.workers)
     end
 end
 
@@ -897,8 +1009,8 @@ julia> nworkers()
 2
 ```
 """
-function nworkers()
-    n = nprocs()
+function nworkers(;role= :default)
+    n = nprocs(role = role)
     n == 1 ? 1 : n-1
 end
 
@@ -918,25 +1030,27 @@ julia> procs()
  3
 ```
 """
-function procs()
-    if myid() == 1 || (PGRP.topology === :all_to_all  && !isclusterlazy())
+function procs(; role= :default)
+    pg = PGRP(role = role)
+    if myid(role=role) == 1 || (pg.topology === :all_to_all  && !isclusterlazy(role = role))
         # filter out workers in the process of being setup/shutdown.
-        return Int[x.id for x in PGRP.workers if isa(x, LocalProcess) || (x.state === W_CONNECTED)]
+        return Int[wid(x, role=role) for x in pg.workers if isa(x, LocalProcess) || (x.state === W_CONNECTED)]
     else
-        return Int[x.id for x in PGRP.workers]
+        return Int[wid(x, role=role) for x in pg.workers]
     end
 end
 
-function id_in_procs(id)  # faster version of `id in procs()`
-    if myid() == 1 || (PGRP.topology === :all_to_all  && !isclusterlazy())
-        for x in PGRP.workers
-            if (x.id::Int) == id && (isa(x, LocalProcess) || (x::Worker).state === W_CONNECTED)
+function id_in_procs(id0; role= :default)  # faster version of `id in procs()`
+    pg = PGRP(role = role)
+    if myid(role=role) == 1 || (pg.topology === :all_to_all  && !isclusterlazy(role = role))
+        for x in pg.workers
+            if (wid(x, role=role)::Int) == id0 && (isa(x, LocalProcess) || (x::Worker).state === W_CONNECTED)
                 return true
             end
         end
     else
-        for x in PGRP.workers
-            if (x.id::Int) == id
+        for x in pg.workers
+            if (wid(x, role=role)::Int) == id0
                 return true
             end
         end
@@ -950,17 +1064,18 @@ end
 Return a list of all process identifiers on the same physical node.
 Specifically all workers bound to the same ip-address as `pid` are returned.
 """
-function procs(pid::Integer)
-    if myid() == 1
-        all_workers = [x for x in PGRP.workers if isa(x, LocalProcess) || (x.state === W_CONNECTED)]
+function procs(pid::Integer; role= :default)
+    if myid(role = role) == 1
+        map_pid_wrkr = Map_pid_wrkr(role = role)
+        all_workers = [x for x in PGRP(role = role).workers if isa(x, LocalProcess) || (x.state === W_CONNECTED)]
         if (pid == 1) || (isa(map_pid_wrkr[pid].manager, LocalManager))
-            Int[x.id for x in filter(w -> (w.id==1) || (isa(w.manager, LocalManager)), all_workers)]
+            Int[wid(x, role=role) for x in filter(w -> (wid(w, role=role)==1) || (isa(w.manager, LocalManager)), all_workers)]
         else
             ipatpid = get_bind_addr(pid)
-            Int[x.id for x in filter(w -> get_bind_addr(w) == ipatpid, all_workers)]
+            Int[wid(x, role=role) for x in filter(w -> get_bind_addr(w) == ipatpid, all_workers)]
         end
     else
-        remotecall_fetch(procs, 1, pid)
+        remotecall_fetch(pid -> procs(pid, role = :manager), 1; role = role)
     end
 end
 
@@ -972,15 +1087,15 @@ Return a list of all worker process identifiers.
 # Examples
 ```julia-repl
 \$ julia -p 2
-
+, pid
 julia> workers()
 2-element Array{Int64,1}:
  2
  3
 ```
 """
-function workers()
-    allp = procs()
+function workers(; role= :default)
+    allp = procs(role = role)
     if length(allp) == 1
        allp
     else
@@ -988,11 +1103,11 @@ function workers()
     end
 end
 
-function cluster_mgmt_from_master_check()
-    if myid() != 1
-        throw(ErrorException("Only process 1 can add and remove workers"))
-    end
-end
+#function cluster_mgmt_from_master_check()
+#    if myid() != 1
+#        throw(ErrorException("Only process 1 can add and remove workers"))
+#    end
+#end
 
 """
     rmprocs(pids...; waitfor=typemax(Int))
@@ -1025,22 +1140,22 @@ julia> workers()
  6
 ```
 """
-function rmprocs(pids...; waitfor=typemax(Int))
-    cluster_mgmt_from_master_check()
+function rmprocs(pids...; role = :default, waitfor=typemax(Int))    # supposed to be called always as :manager
+#    cluster_mgmt_from_master_check()
 
     pids = vcat(pids...)
     if waitfor == 0
-        t = @async _rmprocs(pids, typemax(Int))
+        t = @async _rmprocs(pids, role, typemax(Int))
         yield()
         return t
     else
-        _rmprocs(pids, waitfor)
+        _rmprocs(pids, role, waitfor)
         # return a dummy task object that user code can wait on.
         return @async nothing
     end
 end
 
-function _rmprocs(pids, waitfor)
+function _rmprocs(pids, role, waitfor)
     lock(worker_lock)
     try
         rmprocset = Union{LocalProcess, Worker}[]
@@ -1048,6 +1163,7 @@ function _rmprocs(pids, waitfor)
             if p == 1
                 @warn "rmprocs: process 1 not removed"
             else
+                map_pid_wrkr = Map_pid_wrkr(role = role)
                 if haskey(map_pid_wrkr, p)
                     w = map_pid_wrkr[p]
                     set_worker_state(w, W_TERMINATING)
@@ -1063,7 +1179,7 @@ function _rmprocs(pids, waitfor)
             sleep(min(0.1, waitfor - (time_ns() - start)/1e9))
         end
 
-        unremoved = [wrkr.id for wrkr in filter(w -> w.state !== W_TERMINATED, rmprocset)]
+        unremoved = [wid(wrkr, role=role) for wrkr in filter(w -> w.state !== W_TERMINATED, rmprocset)]
         if length(unremoved) > 0
             estr = string("rmprocs: pids ", unremoved, " not terminated after ", waitfor, " seconds.")
             throw(ErrorException(estr))
@@ -1087,17 +1203,18 @@ end
 # No-arg constructor added for compatibility with Julia 1.0 & 1.1, should be deprecated in the future
 ProcessExitedException() = ProcessExitedException(-1)
 
-worker_from_id(i) = worker_from_id(PGRP, i)
-function worker_from_id(pg::ProcessGroup, i)
+worker_from_id(i; role= :default) = worker_from_id(PGRP(role = role), i; role = role)
+function worker_from_id(pg::ProcessGroup, i; role= :default)
     if !isempty(map_del_wrkr) && in(i, map_del_wrkr)
         throw(ProcessExitedException(i))
     end
+    map_pid_wrkr = Map_pid_wrkr(role = role)
     w = get(map_pid_wrkr, i, nothing)
     if w === nothing
-        if myid() == 1
-            error("no process with id $i exists")
+        if myid(role=role) == 1
+            error("no process with id $i exists ($role)")
         end
-        w = Worker(i)
+        w = Worker(i; role = role)
         map_pid_wrkr[i] = w
     else
         w = w::Union{Worker, LocalProcess}
@@ -1113,25 +1230,26 @@ returns the `pid` of the worker it is connected to.
 This is useful when writing custom [`serialize`](@ref) methods for a type,
 which optimizes the data written out depending on the receiving process id.
 """
-function worker_id_from_socket(s)
+function worker_id_from_socket(s; role= :default)
     w = get(map_sock_wrkr, s, nothing)
     if isa(w,Worker)
         if s === w.r_stream || s === w.w_stream
-            return w.id
+            return wid(w, role=role)
         end
     end
     if isa(s,IOStream) && fd(s)==-1
         # serializing to a local buffer
-        return myid()
+        return myid(role=role)
     end
     return -1
 end
 
 
-register_worker(w) = register_worker(PGRP, w)
-function register_worker(pg, w)
+register_worker(w; role= :default) = register_worker(PGRP(role = role), w; role = role)
+function register_worker(pg, w; role= :default)
     push!(pg.workers, w)
-    map_pid_wrkr[w.id] = w
+    map_pid_wrkr = Map_pid_wrkr(role = role)
+    map_pid_wrkr[wid(w, role=role)] = w
 end
 
 function register_worker_streams(w)
@@ -1139,9 +1257,10 @@ function register_worker_streams(w)
     map_sock_wrkr[w.w_stream] = w
 end
 
-deregister_worker(pid) = deregister_worker(PGRP, pid)
-function deregister_worker(pg, pid)
-    pg.workers = filter(x -> !(x.id == pid), pg.workers)
+deregister_worker(pid; role= :default) = deregister_worker(PGRP(role = role), pid, role=role)
+function deregister_worker(pg, pid; role= :default)
+    pg.workers = filter(x -> !(wid(x, role=role) == pid), pg.workers)
+    map_pid_wrkr = Map_pid_wrkr(role = role)
     w = pop!(map_pid_wrkr, pid, nothing)
     if isa(w, Worker)
         if isdefined(w, :r_stream)
@@ -1151,13 +1270,13 @@ function deregister_worker(pg, pid)
             end
         end
 
-        if myid() == 1 && (myrole() === :master) && isdefined(w, :config)
+        if myid(role=role) == 1 && #=role === :manager &&=# isdefined(w, :config)
             # Notify the cluster manager of this workers death
-            manage(w.manager, w.id, w.config, :deregister)
-            if PGRP.topology !== :all_to_all || isclusterlazy()
-                for rpid in workers()
+            manage(w.manager, wid(w, role=role), w.config, :deregister)
+            if pg.topology !== :all_to_all || isclusterlazy(role = role)
+                for rpid in workers(role=role)
                     try
-                        remote_do(deregister_worker, rpid, pid)
+                        remote_do((pid,role) ->  deregister_worker(pid, role=role), rpid, pid, rpid == 1 ? :manager : :worker; role = role)
                     catch
                     end
                 end
@@ -1192,11 +1311,12 @@ function deregister_worker(pg, pid)
 end
 
 
-function interrupt(pid::Integer)
-    @assert myid() == 1
+function interrupt(pid::Integer)  
+    @assert myid(role = :manager) == 1
+    map_pid_wrkr = Map_pid_wrkr(role = :manager)
     w = map_pid_wrkr[pid]
     if isa(w, Worker)
-        manage(w.manager, w.id, w.config, :interrupt)
+        manage(w.manager, wid(w, role=:manager), w.config, :interrupt)
     end
     return
 end
@@ -1215,8 +1335,8 @@ interrupt(pids::Integer...) = interrupt([pids...])
 Interrupt the current executing task on the specified workers. This is equivalent to
 pressing Ctrl-C on the local machine. If no arguments are given, all workers are interrupted.
 """
-function interrupt(pids::AbstractVector=workers())
-    @assert myid() == 1
+function interrupt(pids::AbstractVector=workers(role = :manager))
+    @assert myid(role = :manager) == 1
     @sync begin
         for pid in pids
             @async interrupt(pid)
@@ -1227,13 +1347,14 @@ end
 wp_bind_addr(p::LocalProcess) = p.bind_addr
 wp_bind_addr(p) = p.config.bind_addr
 
-function check_same_host(pids)
-    if myid() != 1
-        return remotecall_fetch(check_same_host, 1, pids)
+function check_same_host(pids; role= :default)
+    if myid(role = role) != 1
+        return remotecall_fetch(pids -> check_same_host(pids, role = :manager), 1, pids; role = role)
     else
         # We checkfirst if all test pids have been started using the local manager,
         # else we check for the same bind_to addr. This handles the special case
         # where the local ip address may change - as during a system sleep/awake
+        map_pid_wrkr = Map_pid_wrkr(role = role)
         if all(p -> (p==1) || (isa(map_pid_wrkr[p].manager, LocalManager)), pids)
             return true
         else
@@ -1243,18 +1364,18 @@ function check_same_host(pids)
     end
 end
 
-function terminate_all_workers()
-    myid() != 1 && return
+function terminate_all_workers(;role= :default)
+    myid(role = role) != 1 && return
 
-    if nprocs() > 1
+    if nprocs(role = role) > 1
         try
-            rmprocs(workers(); waitfor=5.0)
+            rmprocs(workers(role = role); role = role, waitfor=5.0)
         catch _ex
             @warn "Forcibly interrupting busy workers" exception=_ex
             # Might be computation bound, interrupt them and try again
-            interrupt(workers())
+            interrupt(workers(role = role))
             try
-                rmprocs(workers(); waitfor=5.0)
+                rmprocs(workers(role = role); role = role, waitfor=5.0)
             catch _ex2
                 @error "Unable to terminate all workers" exception=_ex2,catch_backtrace()
             end
@@ -1296,7 +1417,7 @@ let inited = false
         if !inited
             inited = true
             push!(Base.package_callbacks, _require_callback)
-            atexit(terminate_all_workers)
+            atexit(() -> terminate_all_workers(role = :manager))                           # TO CHECK (role argument ???)
             init_bind_addr()
             cluster_cookie(randstring(HDR_COOKIE_LEN))
         end
@@ -1305,14 +1426,18 @@ let inited = false
 end
 
 function init_parallel()
-    start_gc_msgs_task()
+    start_gc_msgs_task(role = :manager)   # TO CHECK
+    start_gc_msgs_task(role = :worker)    # TO CHECK
 
     # start in "head node" mode, if worker, will override later.
-    global PGRP
+    #global PGRP
     global LPROC
-    LPROC.id = 1
-    @assert isempty(PGRP.workers)
-    register_worker(LPROC)
+    LPROC.id0 = 0
+    LPROC.id1 = 1
+    @assert isempty(PGRP(role = :manager).workers)    # TO CHECK
+    @assert isempty(PGRP(role = :worker).workers)     # TO CHECK
+    register_worker(LPROC; role = :manager)           # TO CHECK
+    register_worker(LPROC; role = :worker)            # TO CHECK
 end
 
 write_cookie(io::IO) = print(io.in, string(cluster_cookie(), "\n"))

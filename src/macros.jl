@@ -2,15 +2,15 @@
 
 let nextidx = Threads.Atomic{Int}(0)
     global nextproc
-    function nextproc()
+    function nextproc(;role= :default)
         idx = Threads.atomic_add!(nextidx, 1)
-        return workers()[(idx % nworkers()) + 1]
+        return workers(role = role)[(idx % nworkers(role = role)) + 1]
     end
 end
 
-spawnat(p, thunk) = remotecall(thunk, p)
+spawnat(p, thunk; role= :default) = remotecall(thunk, p; role = role)
 
-spawn_somewhere(thunk) = spawnat(nextproc(),thunk)
+spawn_somewhere(thunk; role= :default) = spawnat(nextproc(role = role),thunk; role = role)
 
 """
     @spawn expr
@@ -191,7 +191,7 @@ Similar to calling `remotecall_eval(Main, procs, expr)`, but with two extra feat
 """
 macro everywhere(ex)
     procs = GlobalRef(@__MODULE__, :procs)
-    return esc(:($(Distributed).@everywhere $procs() $ex))
+    return esc(:($(MultiscaleCluster).@everywhere $procs(role = :manager) $ex))
 end
 
 macro everywhere(procs, ex)
@@ -200,7 +200,7 @@ macro everywhere(procs, ex)
         $(isempty(imps) ? nothing : Expr(:toplevel, imps...)) # run imports locally first
         let ex = Expr(:toplevel, :(task_local_storage()[:SOURCE_PATH] = $(get(task_local_storage(), :SOURCE_PATH, nothing))), $(esc(Expr(:quote, ex)))),
             procs = $(esc(procs))
-            remotecall_eval(Main, procs, ex)
+            remotecall_eval(Main, procs, ex; role = :manager)
         end
     end
 end
@@ -215,14 +215,14 @@ Errors on any of the processes are collected into a
 
 See also [`@everywhere`](@ref).
 """
-function remotecall_eval(m::Module, procs, ex)
+function remotecall_eval(m::Module, procs, ex; role=:default)
     @sync begin
         run_locally = 0
         for pid in procs
-            if pid == myid()
+            if pid == myid(role=role)
                 run_locally += 1
             else
-                @async_unwrap remotecall_wait(Core.eval, pid, m, ex)
+                @async_unwrap remotecall_wait(Core.eval, pid, m, ex; role=role)
             end
         end
         yield() # ensure that the remotecalls have had a chance to start
@@ -238,8 +238,8 @@ end
 
 # optimized version of remotecall_eval for a single pid
 # and which also fetches the return value
-function remotecall_eval(m::Module, pid::Int, ex)
-    return remotecall_fetch(Core.eval, pid, m, ex)
+function remotecall_eval(m::Module, pid::Int, ex; role=:default)
+    return remotecall_fetch(Core.eval, pid, m, ex; role=role)
 end
 
 
@@ -261,13 +261,13 @@ function splitrange(firstIndex::Int, lastIndex::Int, np::Int)
     return chunks
 end
 
-function preduce(reducer, f, R)
-    chunks = splitrange(Int(firstindex(R)), Int(lastindex(R)), nworkers())
-    all_w = workers()[1:length(chunks)]
+function preduce(reducer, f, R; role= :default)
+    chunks = splitrange(Int(firstindex(R)), Int(lastindex(R)), nworkers(role = role))
+    all_w = workers(role = role)[1:length(chunks)]
 
     w_exec = Task[]
     for (idx,pid) in enumerate(all_w)
-        t = Task(()->remotecall_fetch(f, pid, reducer, R, first(chunks[idx]), last(chunks[idx])))
+        t = Task(()->remotecall_fetch(f, pid, reducer, R, first(chunks[idx]), last(chunks[idx]); role = role))
         schedule(t)
         push!(w_exec, t)
     end
@@ -356,6 +356,6 @@ macro distributed(args...)
             ref
         end
     else
-        return :(preduce($(esc(reducer)), $(make_preduce_body(var, body)), $(esc(r))))
+        return :(preduce($(esc(reducer)), $(make_preduce_body(var, body)), $(esc(r)))) # TO CHECK (role ?)
     end
 end

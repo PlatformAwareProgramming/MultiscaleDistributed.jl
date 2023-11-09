@@ -18,16 +18,16 @@ Note that `f` must be made available to all worker processes; see
 [Code Availability and Loading Packages](@ref code-availability)
 for details.
 """
-function pgenerate(p::AbstractWorkerPool, f, c)
+function pgenerate(p::AbstractWorkerPool, f, c; role= :default)
     if length(p) == 0
-        return AsyncGenerator(f, c; ntasks=()->nworkers(p))
+        return AsyncGenerator(f, c; ntasks=()->nworkers(p; role = role))
     end
     batches = batchsplit(c, min_batch_count = length(p) * 3)
-    return Iterators.flatten(AsyncGenerator(remote(p, b -> asyncmap(f, b)), batches))
+    return Iterators.flatten(AsyncGenerator(remote(p, b -> asyncmap(f, b); role = role), batches))
 end
-pgenerate(p::AbstractWorkerPool, f, c1, c...) = pgenerate(p, a->f(a...), zip(c1, c...))
-pgenerate(f, c) = pgenerate(default_worker_pool(), f, c)
-pgenerate(f, c1, c...) = pgenerate(a->f(a...), zip(c1, c...))
+pgenerate(p::AbstractWorkerPool, f, c1, c...; role= :default) = pgenerate(p, a->f(a...), zip(c1, c...); role = role)
+pgenerate(f, c; role= :default) = pgenerate(default_worker_pool(role=role), f, c; role = role)
+pgenerate(f, c1, c...; role= :default) = pgenerate(a->f(a...), zip(c1, c...); role = role)
 
 """
     pmap(f, [::AbstractWorkerPool], c...; distributed=true, batch_size=1, on_error=nothing, retry_delays=[], retry_check=nothing) -> collection
@@ -97,10 +97,10 @@ pmap(f, c; on_error = e->(isa(e, InexactError) ? NaN : rethrow()), retry_delays 
 ```
 """
 function pmap(f, p::AbstractWorkerPool, c; distributed=true, batch_size=1, on_error=nothing,
-                                           retry_delays=[], retry_check=nothing)
+                                           retry_delays=[], retry_check=nothing, role= :default)
     f_orig = f
     # Don't do remote calls if there are no workers.
-    if (length(p) == 0) || (length(p) == 1 && fetch(p.channel) == myid())
+    if (length(p) == 0) || (length(p) == 1 && fetch(p.channel) == myid(role = role))
         distributed = false
     end
 
@@ -116,14 +116,14 @@ function pmap(f, p::AbstractWorkerPool, c; distributed=true, batch_size=1, on_er
         end
 
         if distributed
-            f = remote(p, f)
+            f = remote(p, f; role=role)
         end
 
         if length(retry_delays) > 0
             f = wrap_retry(f, retry_delays, retry_check)
         end
 
-        return asyncmap(f, c; ntasks=()->nworkers(p))
+        return asyncmap(f, c; ntasks=()->nworkers(p; role = role))
     else
         # During batch processing, We need to ensure that if on_error is set, it is called
         # for each element in error, and that we return as many elements as the original list.
@@ -140,12 +140,12 @@ function pmap(f, p::AbstractWorkerPool, c; distributed=true, batch_size=1, on_er
             f = wrap_on_error(f, (x,e)->BatchProcessingError(x,e); capture_data=true)
         end
 
-        f = wrap_batch(f, p, handle_errors)
-        results = asyncmap(f, c; ntasks=()->nworkers(p), batch_size=batch_size)
+        f = wrap_batch(f, p, handle_errors; role=role)
+        results = asyncmap(f, c; ntasks=()->nworkers(p; role = role), batch_size=batch_size)
 
         # process errors if any.
         if handle_errors
-            process_batch_errors!(p, f_orig, results, on_error, retry_delays, retry_check)
+            process_batch_errors!(p, f_orig, results, on_error, retry_delays, retry_check; role = role)
         end
 
         return results
@@ -153,7 +153,7 @@ function pmap(f, p::AbstractWorkerPool, c; distributed=true, batch_size=1, on_er
 end
 
 pmap(f, p::AbstractWorkerPool, c1, c...; kwargs...) = pmap(a->f(a...), p, zip(c1, c...); kwargs...)
-pmap(f, c; kwargs...) = pmap(f, CachingPool(workers()), c; kwargs...)
+pmap(f, c; role = :default, kwargs...) = pmap(f, CachingPool(workers(role = role)), c; role = role, kwargs...)
 pmap(f, c1, c...; kwargs...) = pmap(a->f(a...), zip(c1, c...); kwargs...)
 
 function wrap_on_error(f, on_error; capture_data=false)
@@ -180,11 +180,11 @@ function wrap_retry(f, retry_delays, retry_check)
     end
 end
 
-function wrap_batch(f, p, handle_errors)
+function wrap_batch(f, p, handle_errors; role= :default)
     f = asyncmap_batch(f)
     return batch -> begin
         try
-            remotecall_fetch(f, p, batch)
+            remotecall_fetch(f, p, batch; role=role)
         catch e
             if handle_errors
                 return Any[BatchProcessingError(b, e) for b in batch]
@@ -199,7 +199,7 @@ asyncmap_batch(f) = batch -> asyncmap(x->f(x...), batch)
 extract_exception(e) = isa(e, RemoteException) ? e.captured.ex : e
 
 
-function process_batch_errors!(p, f, results, on_error, retry_delays, retry_check)
+function process_batch_errors!(p, f, results, on_error, retry_delays, retry_check; role= :default)
     # Handle all the ones in error in another pmap, with batch size set to 1
     reprocess = Tuple{Int,BatchProcessingError}[]
     for (idx, v) in enumerate(results)
@@ -211,14 +211,14 @@ function process_batch_errors!(p, f, results, on_error, retry_delays, retry_chec
     if length(reprocess) > 0
         errors = [x[2] for x in reprocess]
         exceptions = Any[x.ex for x in errors]
-        state = iterate(retry_delays)
+        state = iterate(retry_delays#=; role = role=#)
         state !== nothing && (state = state[2])
         error_processed = let state=state
             if (length(retry_delays)::Int > 0) &&
                     (retry_check === nothing || all([retry_check(state,ex)[2] for ex in exceptions]))
                 # BatchProcessingError.data is a tuple of original args
                 pmap(x->f(x...), p, Any[x.data for x in errors];
-                        on_error = on_error, retry_delays = collect(retry_delays)[2:end::Int], retry_check = retry_check)
+                        on_error = on_error, retry_delays = collect(retry_delays)[2:end::Int], retry_check = retry_check, role = role)
             elseif on_error !== nothing
                 map(on_error, exceptions)
             else
@@ -240,7 +240,7 @@ Return `head`: the first `n` elements of `c`;
 and `tail`: an iterator over the remaining elements.
 
 ```jldoctest
-julia> b, c = Distributed.head_and_tail(1:10, 3)
+julia> b, c = MultiscaleCluster.head_and_tail(1:10, 3)
 ([1, 2, 3], Base.Iterators.Rest{UnitRange{Int64}, Int64}(1:10, 3))
 
 julia> collect(c)

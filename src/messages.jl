@@ -99,30 +99,30 @@ function send_msg_unknown(s::IO, header, msg)
     error("attempt to send to unknown socket")
 end
 
-function send_msg(s::IO, header, msg)
-    id = worker_id_from_socket(s)
+function send_msg(s::IO, header, msg; role= :default)
+    id = worker_id_from_socket(s; role = role)
     if id > -1
-        return send_msg(worker_from_id(id), header, msg)
+        return send_msg(worker_from_id(id, role=role), header, msg; role = role)
     end
     send_msg_unknown(s, header, msg)
 end
 
-function send_msg_now(s::IO, header, msg::AbstractMsg)
-    id = worker_id_from_socket(s)
+function send_msg_now(s::IO, header, msg::AbstractMsg; role= :default)
+    id = worker_id_from_socket(s; role = role)
     if id > -1
-        return send_msg_now(worker_from_id(id), header, msg)
+        return send_msg_now(worker_from_id(id; role=role), header, msg; role = role)
     end
     send_msg_unknown(s, header, msg)
 end
-function send_msg_now(w::Worker, header, msg)
-    send_msg_(w, header, msg, true)
+function send_msg_now(w::Worker, header, msg; role= :default)
+    send_msg_(w, header, msg, true; role = role)
 end
 
-function send_msg(w::Worker, header, msg)
-    send_msg_(w, header, msg, false)
+function send_msg(w::Worker, header, msg; role= :default)
+    send_msg_(w, header, msg, false; role = role)
 end
 
-function flush_gc_msgs(w::Worker)
+function flush_gc_msgs(w::Worker; role= :default)
     if !isdefined(w, :w_stream)
         return
     end
@@ -144,10 +144,10 @@ function flush_gc_msgs(w::Worker)
         end
     end
     if add_msgs !== nothing
-        remote_do(add_clients, w, add_msgs)
+        remote_do((add_msgs, role) -> add_clients(add_msgs, role = role), w, add_msgs, wid(w,role=role) == 1 ? :manager : :worker; role = role)
     end
     if del_msgs !== nothing
-        remote_do(del_clients, w, del_msgs)
+        remote_do((del_msgs, role) -> del_clients(del_msgs, role = role), w, del_msgs, wid(w,role=role) == 1 ? :manager : :worker; role = role)
     end
     return
 end
@@ -168,9 +168,9 @@ function deserialize_hdr_raw(io)
     return MsgHeader(RRID(data[1], data[2]), RRID(data[3], data[4]))
 end
 
-function send_msg_(w::Worker, header, msg, now::Bool)
-    check_worker_state(w)
-    if myid() != 1 && !isa(msg, IdentifySocketMsg) && !isa(msg, IdentifySocketAckMsg)
+function send_msg_(w::Worker, header, msg, now::Bool; role= :default)
+    check_worker_state(w; role = role)
+    if myid(role=role) != 1 && !isa(msg, IdentifySocketMsg) && !isa(msg, IdentifySocketAckMsg)
         wait(w.initialized)
     end
     io = w.w_stream
@@ -182,7 +182,7 @@ function send_msg_(w::Worker, header, msg, now::Bool)
         write(io, MSG_BOUNDARY)
 
         if !now && w.gcflag
-            flush_gc_msgs(w)
+            flush_gc_msgs(w; role = role)
         else
             flush(io)
         end
@@ -191,11 +191,11 @@ function send_msg_(w::Worker, header, msg, now::Bool)
     end
 end
 
-function flush_gc_msgs()
+function flush_gc_msgs(; role= :default)
     try
-        for w in (PGRP::ProcessGroup).workers
+        for w in (PGRP(role = role)::ProcessGroup).workers
             if isa(w,Worker) && (w.state == W_CONNECTED) && w.gcflag
-                flush_gc_msgs(w)
+                flush_gc_msgs(w; role = role)
             end
         end
     catch e

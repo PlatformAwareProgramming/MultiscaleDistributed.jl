@@ -228,6 +228,7 @@ function parse_machine(machine::AbstractString)
 end
 
 function launch_on_machine(manager::SSHManager, machine::AbstractString, cnt, params::Dict, launched::Array, launch_ntfy::Condition)
+    #@info "launch_on_machine"
     shell = params[:shell]
     ssh = params[:ssh]
     dir = params[:dir]
@@ -476,7 +477,7 @@ function launch(manager::LocalManager, params::Dict, launched::Array, c::Conditi
 
     # TODO: Maybe this belongs in base/initdefs.jl as a package_environment() function
     #       together with load_path() etc. Might be useful to have when spawning julia
-    #       processes outside of Distributed.jl too.
+    #       processes outside of MultiscaleCluster.jl too.
     # JULIA_(LOAD|DEPOT)_PATH are used to populate (LOAD|DEPOT)_PATH on startup,
     # but since (LOAD|DEPOT)_PATH might have changed they are re-serialized here.
     # Users can opt-out of this by passing `env = ...` to addprocs(...).
@@ -723,19 +724,19 @@ It should cause the remote worker specified by `pid` to exit.
 on `pid`.
 """
 function kill(manager::ClusterManager, pid::Int, config::WorkerConfig)
-    remote_do(exit, pid)
+    remote_do(exit, pid; role = :manager)
     nothing
 end
 
 function kill(manager::SSHManager, pid::Int, config::WorkerConfig)
-    remote_do(exit, pid)
+    remote_do(exit, pid; role = :manager)
     cancel_ssh_tunnel(config)
     nothing
 end
 
 function kill(manager::LocalManager, pid::Int, config::WorkerConfig; exit_timeout = 15, term_timeout = 15)
     # First, try sending `exit()` to the remote over the usual control channels
-    remote_do(exit, pid)
+    remote_do(exit, pid; role = :manager)
 
     timer_task = @async begin
         sleep(exit_timeout)

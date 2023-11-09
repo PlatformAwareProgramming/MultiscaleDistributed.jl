@@ -241,14 +241,14 @@ reinitialized. Only those names found to be defined under `mod` are cleared.
 
 An exception is raised if a global constant is requested to be cleared.
 """
-function clear!(syms, pids=workers(); mod=Main)
+function clear!(syms, pids=workers(); mod=Main, role= :default)
     @sync for p in pids
-        @async_unwrap remotecall_wait(clear_impl!, p, syms, mod)
+        @async_unwrap remotecall_wait(clear_impl!, p, syms, mod; role = role)
     end
 end
-clear!(sym::Symbol, pid::Int; mod=Main) = clear!([sym], [pid]; mod=mod)
-clear!(sym::Symbol, pids=workers(); mod=Main) = clear!([sym], pids; mod=mod)
-clear!(syms, pid::Int; mod=Main) = clear!(syms, [pid]; mod=mod)
+clear!(sym::Symbol, pid::Int; mod=Main, role= :default) = clear!([sym], [pid]; mod=mod, role = role)
+clear!(sym::Symbol, pids=workers(); mod=Main, role= :default) = clear!([sym], pids; mod=mod, role = role)
+clear!(syms, pid::Int; mod=Main, role= :default) = clear!(syms, [pid]; mod=mod, role = role)
 
 clear_impl!(syms, mod::Module) = foreach(x->clear_impl!(x,mod), syms)
 clear_impl!(sym::Symbol, mod::Module) = isdefined(mod, sym) && @eval(mod, global $sym = nothing)
