@@ -1,8 +1,19 @@
-# Distributed
+# Distributed (with a multiscale parallelism extension)
 
 The `Distributed` package provides functionality for creating and controlling multiple Julia processes remotely, and for performing distributed and parallel computing. It uses network sockets or other supported interfaces to communicate between Julia processes, and relies on Julia's `Serialization` stdlib package to transform Julia objects into a format that can be transferred between processes efficiently. It provides a full set of utilities to create and destroy new Julia processes and add them to a "cluster" (a collection of Julia processes connected together), as well as functions to perform Remote Procedure Calls (RPC) between the processes within a cluster. See [`API`](@ref) for details.
 
 This package ships as part of the Julia stdlib.
+
+> [!NOTE]
+> This repository is a fork of the original [`Distributed`](https://github.com/JuliaLang/Distributed.jl) package for developing ideas behind the support of _multiscale parallelism_ in Julia. In gross terms, such an extension allows worker processes to execute the `addprocs` operation, so that a worker process may also play the role of a master process with respect to a set of worker processes it creates by invoking `addprocs`. For that, all `Distributed` operations listed below are extended with a keyword parameter `role`, with three possible values: `:default` (default argument), `:master`, and `:worker`. So, a worker that created processes by means of `addprocs` may execute operations as:
+> * a ***worker process*** by using `role = :worker`, for interacting with the master processes that created it, as well as other workers; or
+> * a ***master process*** by using `role = :master`, for interacting with the workers it created.
+>
+> It is important to note that the modifications to the API do not affect usual `Distributed` programs.
+>   
+> Mutiscale parallelism may help programmers in at least two scenarios:
+> * to deploy _multicluster computations_, i.e. parallel computations employing multiple clusters by assuming the parallel programming patterns and tools at the multicluster and cluster levels are distinct;
+> * better support for _multilevel parallel programming_ patterns.
 
 ## Using development versions of this package
 
