@@ -3,6 +3,13 @@
 using Test, Distributed, Random, Serialization, Sockets
 import Distributed: launch, manage
 
+sharedir = normpath(joinpath(Sys.BINDIR, "..", "share"))
+if parse(Bool, get(ENV, "JULIA_DISTRIBUTED_TESTING_STANDALONE", "false"))
+    @test !startswith(pathof(Distributed), sharedir)
+else
+    @test startswith(pathof(Distributed), sharedir)
+end
+
 @test cluster_cookie() isa String
 
 include(joinpath(Sys.BINDIR, "..", "share", "julia", "test", "testenv.jl"))
@@ -960,17 +967,19 @@ end
 # issue #16091
 mutable struct T16091 end
 wid = workers()[1]
-@test try
+try
     remotecall_fetch(()->T16091, wid)
-    false
+    @test "unreachable" === true
 catch ex
-    ((ex::RemoteException).captured::CapturedException).ex === UndefVarError(:T16091)
+    ex = ((ex::RemoteException).captured::CapturedException).ex
+    @test (ex::UndefVarError).var === :T16091
 end
-@test try
+try
     remotecall_fetch(identity, wid, T16091)
-    false
+    @test "unreachable" === true
 catch ex
-    ((ex::RemoteException).captured::CapturedException).ex === UndefVarError(:T16091)
+    ex = ((ex::RemoteException).captured::CapturedException).ex
+    @test (ex::UndefVarError).var === :T16091
 end
 
 f16091a() = 1
@@ -1548,7 +1557,8 @@ try
 catch ex
     @test isa(ex.captured.ex.exceptions[1].ex, ErrorException)
     @test occursin("BoundsError", ex.captured.ex.exceptions[1].ex.msg)
-    @test ex.captured.ex.exceptions[2].ex == UndefVarError(:DontExistOn1)
+    ex = ex.captured.ex.exceptions[2].ex
+    @test (ex::UndefVarError).var === :DontExistOn1
 end
 
 let
