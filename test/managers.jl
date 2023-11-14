@@ -1,9 +1,9 @@
 # This file is a part of Julia. License is MIT: https://julialang.org/license
 
 using Test
-using MultiscaleCluster
+using Distributed
 using Sockets
-using MultiscaleCluster: parse_machine, SSHManager, LocalManager
+using Distributed: parse_machine, SSHManager, LocalManager
 
 @test parse_machine("127.0.0.1") == ("127.0.0.1", nothing)
 @test parse_machine("127.0.0.1:80") == ("127.0.0.1", 80)

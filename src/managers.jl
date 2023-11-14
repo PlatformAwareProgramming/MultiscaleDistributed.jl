@@ -477,7 +477,7 @@ function launch(manager::LocalManager, params::Dict, launched::Array, c::Conditi
 
     # TODO: Maybe this belongs in base/initdefs.jl as a package_environment() function
     #       together with load_path() etc. Might be useful to have when spawning julia
-    #       processes outside of MultiscaleCluster.jl too.
+    #       processes outside of Distributed.jl too.
     # JULIA_(LOAD|DEPOT)_PATH are used to populate (LOAD|DEPOT)_PATH on startup,
     # but since (LOAD|DEPOT)_PATH might have changed they are re-serialized here.
     # Users can opt-out of this by passing `env = ...` to addprocs(...).

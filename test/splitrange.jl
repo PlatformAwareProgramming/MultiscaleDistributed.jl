@@ -1,8 +1,8 @@
 # This file is a part of Julia. License is MIT: https://julialang.org/license
 
 using Test
-using MultiscaleCluster
-using MultiscaleCluster: splitrange
+using Distributed
+using Distributed: splitrange
 
 @test splitrange(1, 11, 1) == Array{UnitRange{Int64},1}([1:11])
 @test splitrange(0, 10, 1) == Array{UnitRange{Int64},1}([0:10])

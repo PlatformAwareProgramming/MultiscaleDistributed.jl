@@ -8,7 +8,7 @@ disttestfile = joinpath(@__DIR__, "distributed_exec.jl")
 cmd = `$test_exename $test_exeflags $disttestfile`
 
 if !success(pipeline(cmd; stdout=stdout, stderr=stderr)) && ccall(:jl_running_on_valgrind,Cint,()) == 0
-    error("MultiscaleCluster test failed, cmd : $cmd")
+    error("Distributed test failed, cmd : $cmd")
 end
 
 include("managers.jl")

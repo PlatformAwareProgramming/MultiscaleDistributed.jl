@@ -274,7 +274,7 @@ macro everywhere(args...)
 
     if isnothing(procs)
         procs = GlobalRef(@__MODULE__, :procs)
-        return esc(:($(MultiscaleCluster).@everywhere $rolearg $procs(;$rolearg) $ex))
+        return esc(:($(Distributed).@everywhere $rolearg $procs(;$rolearg) $ex))
     else
         imps = extract_imports(ex)
         return quote
