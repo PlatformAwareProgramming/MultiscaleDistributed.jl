@@ -14,6 +14,7 @@ This package ships as part of the Julia stdlib.
 > Mutiscale parallelism may help programmers in at least two scenarios:
 > * to deploy _multicluster computations_, i.e. parallel computations employing multiple clusters by assuming the parallel programming patterns and tools at the multicluster and cluster levels are distinct;
 > * better support for _multilevel parallel programming_ patterns.
+> 
 > We are working on the implementation of case studies.
 
 ## Using development versions of this package
