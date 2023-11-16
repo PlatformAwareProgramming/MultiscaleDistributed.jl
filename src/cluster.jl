@@ -468,7 +468,7 @@ function addprocs(manager::ClusterManager; kwargs...)
     try
 
         if myrole() == :worker
-            myrole!(:master)
+            myrole!(:master_worker)
         end
         PGRP(role=:master).level = PGRP(role=:worker).level + 1
 

@@ -565,7 +565,14 @@ function call_on_owner(f, rr::AbstractRemoteRef, args...; role= :default)
     if rr.where == myid(role = role)
         f(rid, args...)
     else
+        #remotecall_fetch((rid,role) -> f(rid, role = role, args...), rr.where, rid, rr.where==1 ? :master : :worker; role = role)
         remotecall_fetch((rid,role) -> f(rid, args...; role=role), rr.where, rid, rr.where==1 ? :master : :worker; role = role)
+
+
+        #remotecall_fetch(rid -> f(rid, role = rr.where==1 ? :master : :worker, args...), rr.where; role = role)
+        #remotecall_fetch(iiiii, rr.where, f, rid, rr.where==1 ? :master : :worker, args...; role = role)
+#        remotecall_fetch(f, rr.where, rid, args...)
+
     end
 end
 
@@ -655,7 +662,7 @@ function fetch(r::Future; role= :default)
     something(v_cache)
 end
 
-fetch_ref(rid, args...; role=:default) = (@info "fetch_ref $role"; fetch(lookup_ref(rid; role = role).c, #=role=role,=# args...))
+fetch_ref(rid, args...; role=:default) = fetch(lookup_ref(rid; role = role).c, #=role=role,=# args...)
 
 
 
