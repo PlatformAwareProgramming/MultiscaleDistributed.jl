@@ -616,37 +616,29 @@ Further calls to `fetch` on the same reference return the cached value. If the r
 is an exception, throws a [`RemoteException`](@ref) which captures the remote exception and backtrace.
 """
 function fetch(r::Future; role= :default)
-    @info "fetch 1"
     v_cache = @atomic r.v
     v_cache !== nothing && return something(v_cache)
 
-    @info "fetch 2"
     if r.where == myid(role = role)
-        @info "fetch 2.1"
         rv, v_cache = @lock r.lock begin
             v_cache = @atomic :monotonic r.v
             rv = v_cache === nothing ? lookup_ref(remoteref_id(r); role = role) : nothing
             rv, v_cache
         end
-        @info "fetch 2.2"
 
         if v_cache !== nothing
             return something(v_cache)
         else
             v_local = fetch(rv.c)
         end
-        @info "fetch 2.3"
     else
         #v_local = call_on_owner((rid, args...; role=role) -> fetch_ref(rid, args...;role=role), r; role = role)
         v_local = call_on_owner(fetch_ref, r; role = role)
     end
-    @info "fetch 3"
 
     v_cache = @atomic r.v
-    @info "fetch 4"
 
     if v_cache === nothing # call_on_owner case
-        @info "fetch 4.1"
         v_old, status = @lock r.lock begin
             @atomicreplace r.v nothing => Some(v_local)
         end
@@ -658,22 +650,17 @@ function fetch(r::Future; role= :default)
 
         # remote calls getting the value from `call_on_owner` used to return the value directly without wrapping it in `Some(x)`
         # so we're doing the same thing here
-        @info "fetch 4.2"
         if status
             send_del_client(r; role = role)
             return v_local
         else # this `v_cache` is returned at the end of the function
             v_cache = v_old
         end
-        @info "fetch 4.3"
     end
-    @info "fetch 5"
 
     send_del_client(r; role = role)
-    @info "fetch 6"
 
     something(v_cache)
-    @info "fetch 7"
 
 end
 
