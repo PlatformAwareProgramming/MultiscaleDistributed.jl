@@ -228,7 +228,7 @@ function message_handler_loop(r_stream::IO, w_stream::IO, incoming::Bool; role= 
             # If unhandleable error occurred talking to pid 1, exit
             if wpid == 1
                 if isopen(w_stream)
-                    @error "Fatal error on process $(myid(role=roleee))" exception=e,catch_backtrace()
+                    @error "Fatal error on process $(myid(role=role))" exception=e,catch_backtrace()
                 end
                 exit(1)
             end
