@@ -168,7 +168,7 @@ function check_worker_state(w::Worker; role= :default)
                 t = @async exec_conn_func(w; role=role)
             else
                 # route request via node 1
-                t = @async remotecall_fetch((p,to_id) -> remotecall_fetch((to_id, role) -> exec_conn_func(to_id; role = role), p, to_id, p == 1 ? :master : :worker; role = role), 1, wid(w, role=role), myid(role=role))
+                t = @async remotecall_fetch((p,to_id) -> remotecall_fetch((to_id, role) -> exec_conn_func(to_id; role = role), p, to_id, p == 1 ? :master : :worker; role = role), 1, wid(w, role=role), myid(role=role); role=role)
             end
             errormonitor(t)
             wait_for_conn(w; role=role)

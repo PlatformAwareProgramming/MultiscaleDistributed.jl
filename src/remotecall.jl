@@ -423,7 +423,7 @@ end
 # make a thunk to call f on args in a way that simulates what would happen if
 # the function were sent elsewhere
 function local_remotecall_thunk(f, args, kwargs)
-    println("local_remotecall_thunk($f, $args, $kwargs)")
+    #println("local_remotecall_thunk($f, $args, $kwargs)")
     return ()->invokelatest(f, args...; kwargs...)
 end
 
@@ -455,20 +455,39 @@ function remotecall_fetch(f, w::LocalProcess, args...; role= :default, kwargs...
     return isa(v, RemoteException) ? throw(v) : v
 end
 
+
 function remotecall_fetch(f, w::Worker, args...; role= :default, kwargs...)
     # can be weak, because the program will have no way to refer to the Ref
     # itself, it only gets the result.
     oid = RRID(role = role)
     rv = lookup_ref(oid; role = role)
-    rv.waitingfor = wid(w, role=role)
-    @info "send_msg ..."
-    send_msg(w, MsgHeader(RRID(0,0), oid), CallMsg{:call_fetch}(f, args, role = role, kwargs); role = role)
+    rv.waitingfor = wid(w, role = role)
+    send_msg(w, MsgHeader(RRID(0,0), oid), CallMsg{:call_fetch}(f, args, kwargs); role = role)
     v = take!(rv)
     lock(client_refs) do
         delete!(PGRP(role = role).refs, oid)
     end
     return isa(v, RemoteException) ? throw(v) : v
 end
+
+
+#=
+function remotecall_fetch(f, w::Worker, args...; kwargs...)
+    # can be weak, because the program will have no way to refer to the Ref
+    # itself, it only gets the result.
+    role = haskey(kwargs, :role) ? kwargs[:role] : :default
+    oid = RRID(role = role)
+    rv = lookup_ref(oid; role = role)
+    rv.waitingfor = wid(w, role=role)
+    @info "send_msg ...$(Base.nameof(f)) === $(Base.kwarg_decl.(methods(f)))"
+    send_msg(w, MsgHeader(RRID(0,0), oid), CallMsg{:call_fetch}(f, args, kwargs); role = role)
+    v = take!(rv)
+    lock(client_refs) do
+        delete!(PGRP(role = role).refs, oid)
+    end
+    return isa(v, RemoteException) ? throw(v) : v
+end
+=#
 
 """
     remotecall_fetch(f, id::Integer, args...; kwargs...)
