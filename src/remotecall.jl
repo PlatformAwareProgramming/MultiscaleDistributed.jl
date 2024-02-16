@@ -423,6 +423,7 @@ end
 # make a thunk to call f on args in a way that simulates what would happen if
 # the function were sent elsewhere
 function local_remotecall_thunk(f, args, kwargs)
+    println("local_remotecall_thunk($f, $args, $kwargs)")
     return ()->invokelatest(f, args...; kwargs...)
 end
 
@@ -460,7 +461,8 @@ function remotecall_fetch(f, w::Worker, args...; role= :default, kwargs...)
     oid = RRID(role = role)
     rv = lookup_ref(oid; role = role)
     rv.waitingfor = wid(w, role=role)
-    send_msg(w, MsgHeader(RRID(0,0), oid), CallMsg{:call_fetch}(f, args, kwargs); role = role)
+    @info "send_msg ..."
+    send_msg(w, MsgHeader(RRID(0,0), oid), CallMsg{:call_fetch}(f, args, role = role, kwargs); role = role)
     v = take!(rv)
     lock(client_refs) do
         delete!(PGRP(role = role).refs, oid)
