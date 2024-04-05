@@ -701,6 +701,8 @@ function connect_to_worker(host::AbstractString, port::Integer)
         bind_addr = getaddrinfo(host)
     end
 
+    @info "connect_to_worker: $host $port"
+
     iptype = typeof(bind_addr)
     sock = socket_reuse_port(iptype)
     connect(sock, bind_addr, UInt16(port))
