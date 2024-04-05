@@ -261,7 +261,7 @@ function start_worker(out::IO, cookie::AbstractString=readline(stdin); close_std
     stderr_to_stdout && redirect_stderr(stdout)
 
     init_worker(cookie)
-    interface = IPv6(LPROC.bind_addr)
+    interface = IPv4(LPROC.bind_addr)
     if LPROC.bind_port == 0
         port_hint = 9000 + (getpid() % 1000)
         (port, sock) = listenany(interface, UInt16(port_hint))
@@ -1397,7 +1397,7 @@ function init_bind_addr()
     else
         bind_port = 0
         try
-            bind_addr = string(getipaddr(IPv6))
+            bind_addr = string(getipaddr())
         catch
             # All networking is unavailable, initialize bind_addr to the loopback address
             # Will cause an exception to be raised only when used.
