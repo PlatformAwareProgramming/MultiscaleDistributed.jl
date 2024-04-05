@@ -582,19 +582,23 @@ function connect(manager::ClusterManager, pid::Int, config::WorkerConfig)
         return connect(manager, pid, config)
     end
 
+    @info "CONNECT W1"
+
     # master connecting to workers
     if config.io !== nothing
         (bind_addr, port::Int) = read_worker_host_port(config.io)
-        @info "CONNECT W $bind_addr $port"
+        @info "CONNECT W2 $bind_addr $port"
         pubhost = something(config.host, bind_addr)
         config.host = pubhost
         config.port = port
     else
+        @info "CONNECT W3"
         pubhost = notnothing(config.host)
         port = notnothing(config.port)
         bind_addr = something(config.bind_addr, pubhost)
     end
 
+    @info "CONNECT W4"
     tunnel = something(config.tunnel, false)
 
     s = split(pubhost,'@')
