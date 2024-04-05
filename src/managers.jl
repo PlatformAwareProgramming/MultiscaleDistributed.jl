@@ -577,7 +577,6 @@ function connect(manager::ClusterManager, pid::Int, config::WorkerConfig)
         config.host = rhost
         config.port = rport
         config.connect_at = nothing
-        config.io = nothing
         #return connect_w2w(pid, config)
         return connect(manager, pid, config)
     end
