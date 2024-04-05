@@ -1398,6 +1398,7 @@ function init_bind_addr()
         bind_port = 0
         try
             bind_addr = string(getipaddr())
+            @info "ADDR: $(getipaddrs())"
         catch
             # All networking is unavailable, initialize bind_addr to the loopback address
             # Will cause an exception to be raised only when used.
