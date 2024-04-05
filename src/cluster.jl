@@ -1427,7 +1427,7 @@ end
 
 function init_parallel()
     start_gc_msgs_task(role = :master)   # TO CHECK
-    start_gc_msgs_task(role = :worker)    # TO CHECK
+    start_gc_msgs_task(role = :worker)   # TO CHECK
 
     # start in "head node" mode, if worker, will override later.
     #global PGRP

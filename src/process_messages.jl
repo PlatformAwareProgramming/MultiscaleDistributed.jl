@@ -170,7 +170,7 @@ function message_handler_loop(r_stream::IO, w_stream::IO, incoming::Bool; role= 
         while true
             reset_state(serializer)
             header = deserialize_hdr_raw(r_stream)
-            println("header: ", header)
+            #println("header: ", header)
 
             try
                 msg = invokelatest(deserialize_msg, serializer)
@@ -207,7 +207,7 @@ function message_handler_loop(r_stream::IO, w_stream::IO, incoming::Bool; role= 
             end
             readbytes!(r_stream, boundary, length(MSG_BOUNDARY))
 
-            println("got msg: ", typeof(msg))
+            #println("got msg: ", typeof(msg))
             handle_msg(msg, header, r_stream, w_stream, version; role = role)
         end
     catch e
