@@ -1397,8 +1397,10 @@ function init_bind_addr()
     else
         bind_port = 0
         try
-            bind_addr = string(getipaddr())
-            @info "ADDR: $(getipaddrs())"
+            ips = getipaddrs(IPv4; loopback = false)
+            n = length(ips)
+            bind_addr = string(ips[n])
+            #@info "ADDR: $(getipaddrs())"
         catch
             # All networking is unavailable, initialize bind_addr to the loopback address
             # Will cause an exception to be raised only when used.
