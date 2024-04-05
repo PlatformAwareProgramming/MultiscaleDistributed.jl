@@ -573,7 +573,12 @@ workers.
 function connect(manager::ClusterManager, pid::Int, config::WorkerConfig)
     if config.connect_at !== nothing
         # this is a worker-to-worker setup call.
-        return connect_w2w(pid, config)
+        (rhost, rport) = notnothing(config.connect_at)::Tuple{String, Int}
+        config.host = rhost
+        config.port = rport
+        config.connect_at = nothing
+        #return connect_w2w(pid, config)
+        return connect(manager, pid, config)
     end
 
     # master connecting to workers
