@@ -1397,7 +1397,7 @@ function init_bind_addr()
     else
         bind_port = 0
         try
-            bind_addr = string(getipaddr())
+            bind_addr = string(getipaddr(IPv6))
         catch
             # All networking is unavailable, initialize bind_addr to the loopback address
             # Will cause an exception to be raised only when used.
