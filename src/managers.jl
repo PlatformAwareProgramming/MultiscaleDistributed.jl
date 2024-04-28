@@ -362,7 +362,11 @@ function launch_on_machine(manager::SSHManager, machine::AbstractString, cnt, pa
     wconfig.count = cnt
     wconfig.max_parallel = params[:max_parallel]
     wconfig.enable_threaded_blas = params[:enable_threaded_blas]
-
+    @info "will test connect_idents -- $(wconfig.ident)"
+    if haskey(params,:connect_idents)
+       wconfig.connect_idents = Vector(params[:connect_idents])
+       @info "connect_idents = $(wconfig.connect_idents)"
+    end
 
     push!(launched, wconfig)
     notify(launch_ntfy)
