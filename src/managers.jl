@@ -369,8 +369,9 @@ function launch_on_machine(manager::SSHManager, machine::AbstractString, cnt, pa
        wconfig.connect_idents = Vector(params[:connect_idents])
        @info "connect_idents = $(wconfig.connect_idents)"
     end
-    if haskey(params, :ident)
+    if haskey(params, :ident) && !isnothing(params[:ident])
         wconfig.ident = params[:ident]
+        @info "-------------- $(wconfig.ident)"
     end
 
     push!(launched, wconfig)
