@@ -170,6 +170,7 @@ default_addprocs_params(::SSHManager) =
               :tunnel         => false,
               :multiplex      => false,
               :max_parallel   => 10,
+              :ident          => nothing,
               :connect_idents => nothing))
 
 function launch(manager::SSHManager, params::Dict, launched::Array, launch_ntfy::Condition)
@@ -367,6 +368,9 @@ function launch_on_machine(manager::SSHManager, machine::AbstractString, cnt, pa
     if haskey(params,:connect_idents)
        wconfig.connect_idents = Vector(params[:connect_idents])
        @info "connect_idents = $(wconfig.connect_idents)"
+    end
+    if haskey(params, :ident)
+        wconfig.ident = params[:ident]
     end
 
     push!(launched, wconfig)
