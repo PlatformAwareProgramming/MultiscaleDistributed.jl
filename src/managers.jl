@@ -706,10 +706,9 @@ function connect_to_worker(host::AbstractString, port::Integer)
     # host may be a stringified ipv4 / ipv6 address or a dns name
     bind_addr = nothing
     try
-        @info "1: PARSE $host"
+        @info "1: PARSE $host - $(getalladdrinfo(host))"
         bind_addr = parse(IPAddr,host)
     catch
-        @info "2: $(getalladdrinfo(host))"
         bind_addr = getaddrinfo(host)
     end
 
