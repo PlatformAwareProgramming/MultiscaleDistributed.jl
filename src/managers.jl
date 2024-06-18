@@ -591,7 +591,7 @@ function connect(manager::ClusterManager, pid::Int, config::WorkerConfig)
         #return connect(manager, pid, config)
     end
 
-    #@info "CONNECT W1"
+    #@info "CONNECT W1 "
 
     # master connecting to workers
     if config.io !== nothing
@@ -607,8 +607,8 @@ function connect(manager::ClusterManager, pid::Int, config::WorkerConfig)
         bind_addr = something(config.bind_addr, pubhost)
     end
 
-    #@info "CONNECT W4"
     tunnel = something(config.tunnel, false)
+    @info "CONNECT TUNNEL=$tunnel"
 
     s = split(pubhost,'@')
     user = ""
