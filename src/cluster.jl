@@ -1387,6 +1387,7 @@ end
 function init_bind_addr()
     opts = JLOptions()
     if opts.bindto != C_NULL
+        @info "A1: $(opt.bindto)"
         bind_to = split(unsafe_string(opts.bindto), ":")
         bind_addr = string(parse(IPAddr, bind_to[1]))
         if length(bind_to) > 1
@@ -1395,6 +1396,7 @@ function init_bind_addr()
             bind_port = 0
         end
     else
+        @info "A2: $(getipaddrs(IPv4; loopback = false))"
         bind_port = 0
         try
             ips = getipaddrs(IPv4; loopback = false)
