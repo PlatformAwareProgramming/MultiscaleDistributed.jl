@@ -1387,8 +1387,8 @@ end
 function init_bind_addr()
     opts = JLOptions()
     if opts.bindto != C_NULL
-        @info "A1: $(opts.bindto)"
         bind_to = split(unsafe_string(opts.bindto), ":")
+        @info "A1: $bind_to"
         bind_addr = string(parse(IPAddr, bind_to[1]))
         if length(bind_to) > 1
             bind_port = parse(Int,bind_to[2])
