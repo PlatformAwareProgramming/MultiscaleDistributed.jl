@@ -607,7 +607,7 @@ function connect(manager::ClusterManager, pid::Int, config::WorkerConfig)
         bind_addr = something(config.bind_addr, pubhost)
     end
 
-    tunnel = something(config.tunnel, false)
+    tunnel = true # something(config.tunnel, false)
     @info "CONNECT TUNNEL=$tunnel"
 
     s = split(pubhost,'@')
