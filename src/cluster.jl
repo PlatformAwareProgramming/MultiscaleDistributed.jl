@@ -208,6 +208,7 @@ mutable struct LocalProcess
     id0::Int
     id1::Int
     bind_addr::String
+    bind_addr_2::String
     bind_port::UInt16
     cookie::String
     LocalProcess() = new(1,1)
@@ -273,7 +274,7 @@ function start_worker(out::IO, cookie::AbstractString=readline(stdin); close_std
         client = accept(sock)
         process_messages(client, client, true; role = :worker)
     end)
-    println(out, "julia_worker:$(string(LPROC.bind_port))#$(LPROC.bind_addr)\n")  # print header
+    println(out, "julia_worker:$(string(LPROC.bind_port))#$(LPROC.bind_addr_2)\n")  # print header
     flush(out)
 
     Sockets.nagle(sock, false)
@@ -1384,7 +1385,7 @@ function terminate_all_workers(;role= :default)
 end
 
 # initialize the local proc network address / port
-function init_bind_addr()
+#=function init_bind_addr()
     opts = JLOptions()
     if opts.bindto != C_NULL
         bind_to = split(unsafe_string(opts.bindto), ":")
@@ -1413,6 +1414,43 @@ function init_bind_addr()
     LPROC.bind_addr = bind_addr
     LPROC.bind_port = UInt16(bind_port)
 end
+=#
+
+function init_bind_addr()
+    opts = JLOptions()
+
+    @info "A2: $(getipaddrs(IPv4; loopback = false))"
+    bind_port = 0
+    try
+        ips = getipaddrs(IPv4; loopback = false)
+        n = length(ips)
+        bind_addr = string(ips[n])
+        #@info "ADDR: $(getipaddrs())"
+    catch
+        # All networking is unavailable, initialize bind_addr to the loopback address
+        # Will cause an exception to be raised only when used.
+        bind_addr = "127.0.0.1"
+    end
+
+    if opts.bindto != C_NULL
+        bind_to = split(unsafe_string(opts.bindto), ":")
+        @info "A1: $bind_to"
+        bind_addr_2 = string(parse(IPAddr, bind_to[1]))
+        if length(bind_to) > 1
+            bind_port = parse(Int,bind_to[2])
+        else
+            bind_port = 0
+        end
+    else
+        bind_addr_2 = bind_addr
+    end
+
+    global LPROC
+    LPROC.bind_addr = bind_addr
+    LPROC.bind_addr_2 = bind_addr_2 
+    LPROC.bind_port = UInt16(bind_port)
+end
+
 
 using Random: randstring
 
