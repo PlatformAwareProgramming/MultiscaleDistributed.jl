@@ -1421,6 +1421,7 @@ function init_bind_addr()
 
     @info "A2: $(getipaddrs(IPv4; loopback = false))"
     bind_port = 0
+    bind_addr = ""
     try
         ips = getipaddrs(IPv4; loopback = false)
         n = length(ips)
