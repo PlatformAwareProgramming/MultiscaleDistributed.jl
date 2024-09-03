@@ -518,6 +518,8 @@ test_iteration(RemoteChannel(() -> Channel(10)), RemoteChannel(() -> Channel(10)
     return count
 end
 
+@everywhere test_iteration_collect(ch) = length(collect(ch))
+
 @everywhere function test_iteration_put(ch, total)
     for i in 1:total
         put!(ch, i)
@@ -528,10 +530,16 @@ end
 let ch = RemoteChannel(() -> Channel(1))
     @async test_iteration_put(ch, 10)
     @test 10 == @fetchfrom id_other test_iteration_take(ch)
+    ch = RemoteChannel(() -> Channel(1))
+    @async test_iteration_put(ch, 10)
+    @test 10 == @fetchfrom id_other test_iteration_collect(ch)    
     # now reverse
     ch = RemoteChannel(() -> Channel(1))
     @spawnat id_other test_iteration_put(ch, 10)
     @test 10 == test_iteration_take(ch)
+    ch = RemoteChannel(() -> Channel(1))
+    @spawnat id_other test_iteration_put(ch, 10)
+    @test 10 == test_iteration_collect(ch)
 end
 
 # make sure exceptions propagate when waiting on Tasks
@@ -750,6 +758,28 @@ wp = WorkerPool(workers())
 @test nworkers() == length(unique(remotecall_fetch(wp->pmap(_->myid(), wp, 1:100), id_other, wp)))
 wp = WorkerPool(2:3)
 @test sort(unique(pmap(_->myid(), wp, 1:100))) == [2,3]
+
+# wait on worker pool
+wp = WorkerPool(2:2)
+w = take!(wp)
+
+# local call to _wait
+@test !isready(wp)
+t = @async wait(wp)
+@test !istaskdone(t)
+put!(wp, w)
+status = timedwait(() -> istaskdone(t), 10)
+@test status == :ok
+
+# remote call to _wait
+take!(wp)
+@test !isready(wp)
+f = @spawnat w wait(wp)
+@test !isready(f)
+put!(wp, w)
+status = timedwait(() -> isready(f), 10)
+@test status == :ok
+
 
 # CachingPool tests
 wp = CachingPool(workers())
@@ -2037,7 +2067,7 @@ begin
 
     # Next, ensure we get a log message when a worker does not cleanly exit
     w = only(addprocs(1))
-    @test_logs (:warn, r"sending SIGTERM") begin
+    @test_logs (:warn, r"sending SIGQUIT") begin
         remote_do(w) do
             # Cause the 'exit()' message that `rmprocs()` sends to do nothing
             Core.eval(Base, :(exit() = nothing))
