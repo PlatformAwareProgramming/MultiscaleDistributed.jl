@@ -1397,13 +1397,11 @@ end
             bind_port = 0
         end
     else
-        @info "A2: $(getipaddrs(IPv4; loopback = false))"
         bind_port = 0
         try
             ips = getipaddrs(IPv4; loopback = false)
             n = length(ips)
             bind_addr = string(ips[n])
-            #@info "ADDR: $(getipaddrs())"
         catch
             # All networking is unavailable, initialize bind_addr to the loopback address
             # Will cause an exception to be raised only when used.
@@ -1416,7 +1414,7 @@ end
 end
 =#
 
-function init_bind_addr()
+#=function init_bind_addr()
     opts = JLOptions()
 
     @info "A2: $(getipaddrs(IPv4; loopback = false))"
@@ -1426,7 +1424,7 @@ function init_bind_addr()
         ips = getipaddrs(IPv4; loopback = false)
         n = length(ips)
         bind_addr = string(ips[n])
-        #@info "ADDR: $(getipaddrs())"
+        @info "ADDR: $ips --- $ips"
     catch
         # All networking is unavailable, initialize bind_addr to the loopback address
         # Will cause an exception to be raised only when used.
@@ -1447,11 +1445,38 @@ function init_bind_addr()
     end
 
     global LPROC
+    @info "bind_addr=$bind_addr / bind_addr_2=$bind_addr_2"
     LPROC.bind_addr = bind_addr
-    LPROC.bind_addr_2 = bind_addr_2 
+    LPROC.bind_addr_2 = bind_addr_2
     LPROC.bind_port = UInt16(bind_port)
 end
+=#
 
+function init_bind_addr()
+    opts = JLOptions()
+    if opts.bindto != C_NULL
+        bind_to = split(unsafe_string(opts.bindto), ":")
+        bind_addr = string(parse(IPAddr, bind_to[1]))
+        if length(bind_to) > 1
+            bind_port = parse(Int,bind_to[2])
+        else
+            bind_port = 0
+        end
+    else
+        bind_port = 0
+        try
+            bind_addr = string(getipaddr())
+        catch
+            # All networking is unavailable, initialize bind_addr to the loopback address
+            # Will cause an exception to be raised only when used.
+            bind_addr = "127.0.0.1"
+        end
+    end
+    global LPROC
+    LPROC.bind_addr = bind_addr
+    LPROC.bind_addr_2 = bind_addr
+    LPROC.bind_port = UInt16(bind_port)
+end
 
 using Random: randstring
 
