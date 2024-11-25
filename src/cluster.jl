@@ -350,7 +350,7 @@ function read_worker_host_port(io::IO)
                 throw(LaunchWorkerError("Unable to read host:port string from worker. Launch command exited with error?"))
             end
 
-            @error "conninfo: $conninfo"
+            #@error "conninfo: $conninfo"
 
             ntries -= 1
             bind_addr, port = parse_connection_info(conninfo)

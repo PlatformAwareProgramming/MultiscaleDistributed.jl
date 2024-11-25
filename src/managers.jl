@@ -610,7 +610,6 @@ function connect(manager::ClusterManager, pid::Int, config::WorkerConfig)
     end
 
     tunnel = something(config.tunnel, false)
-    @info "CONNECT TUNNEL=$tunnel"
 
     s = split(pubhost,'@')
     user = ""
@@ -715,7 +714,7 @@ function connect_to_worker(host::AbstractString, port::Integer)
 
 
     iptype = typeof(bind_addr)
-    @info "connect_to_worker: $host $port $bind_addr $iptype"
+    #@info "connect_to_worker: $host $port $bind_addr $iptype"
     sock = socket_reuse_port(iptype)
     connect(sock, bind_addr, UInt16(port))
 
