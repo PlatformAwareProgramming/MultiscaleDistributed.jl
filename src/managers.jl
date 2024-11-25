@@ -366,14 +366,14 @@ function launch_on_machine(manager::SSHManager, machine::AbstractString, cnt, pa
     wconfig.count = cnt
     wconfig.max_parallel = params[:max_parallel]
     wconfig.enable_threaded_blas = params[:enable_threaded_blas]
-    @info "will test connect_idents -- $(wconfig.ident)"
+    #@info "will test connect_idents -- $(wconfig.ident)"
     if haskey(params,:connect_idents) && !isnothing(params[:connect_idents])
        wconfig.connect_idents = Vector(params[:connect_idents])
-       @info "connect_idents = $(wconfig.connect_idents)"
+    #   @info "connect_idents = $(wconfig.connect_idents)"
     end
     if haskey(params, :ident) && !isnothing(params[:ident])
         wconfig.ident = params[:ident]
-        @info "-------------- $(wconfig.ident)"
+    #    @info "-------------- $(wconfig.ident)"
     end
 
     push!(launched, wconfig)
