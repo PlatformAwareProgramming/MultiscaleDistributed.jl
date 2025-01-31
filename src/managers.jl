@@ -232,7 +232,7 @@ function parse_machine(machine::AbstractString)
 end
 
 function launch_on_machine(manager::SSHManager, machine::AbstractString, cnt, params::Dict, launched::Array, launch_ntfy::Condition)
-    #@info "launch_on_machine"
+
     shell = params[:shell]
     ssh = params[:ssh]
     dir = params[:dir]
@@ -598,8 +598,9 @@ function connect(manager::ClusterManager, pid::Int, config::WorkerConfig)
     # master connecting to workers
     if config.io !== nothing
         (bind_addr, port::Int) = read_worker_host_port(config.io)
-        #@info "CONNECT W2 $bind_addr $port"
+       # @info "CONNECT W2 $bind_addr $port $(config.host) $(config.bind_addr)"
         pubhost = something(config.host, bind_addr)
+       # @info "CONNECT W21 $pubhost"
         config.host = pubhost
         config.port = port
     else
@@ -641,7 +642,7 @@ function connect(manager::ClusterManager, pid::Int, config::WorkerConfig)
             release(sem)
         end
     else
-        (s, bind_addr) = connect_to_worker(bind_addr, port)
+        (s, bind_addr) = connect_to_worker(#=bind_addr=# pubhost, port)
     end
 
     config.bind_addr = bind_addr
@@ -703,6 +704,9 @@ function bind_client_port(sock::TCPSocket, iptype)
 end
 
 function connect_to_worker(host::AbstractString, port::Integer)
+
+#    @info "--------- CONNECT TO WORKER $host $port"
+
     # Avoid calling getaddrinfo if possible - involves a DNS lookup
     # host may be a stringified ipv4 / ipv6 address or a dns name
     bind_addr = nothing
@@ -714,7 +718,6 @@ function connect_to_worker(host::AbstractString, port::Integer)
 
 
     iptype = typeof(bind_addr)
-    #@info "connect_to_worker: $host $port $bind_addr $iptype"
     sock = socket_reuse_port(iptype)
     connect(sock, bind_addr, UInt16(port))
 
@@ -723,6 +726,9 @@ end
 
 
 function connect_to_worker_with_tunnel(host::AbstractString, bind_addr::AbstractString, port::Integer, tunnel_user::AbstractString, sshflags, multiplex)
+
+   # @info "++++++++ CONNECT TO WORKER WITH TUNNEL host=$host port=$port bind_addr=$bind_addr tunnel_user=$tunnel_user sshflags=$sshflags multiplex=$multiplex"
+
     localport = ssh_tunnel(tunnel_user, host, bind_addr, UInt16(port), sshflags, multiplex)
     s = connect("localhost", localport)
     forward = "$localport:$bind_addr:$port"
