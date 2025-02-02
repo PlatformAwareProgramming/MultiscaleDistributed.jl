@@ -99,10 +99,10 @@ mutable struct Worker
     del_msgs::Array{Any,1} # XXX: Could del_msgs and add_msgs be Channels?
     add_msgs::Array{Any,1}
     @atomic gcflag::Bool
-    state::WorkerState
-    c_state::Condition      # wait for state changes
-    ct_time::Float64        # creation time
-    conn_func::Any          # used to setup connections lazily
+    @atomic state::WorkerState
+    c_state::Threads.Condition # wait for state changes, lock for state
+    ct_time::Float64           # creation time
+    conn_func::Any             # used to setup connections lazily
 
     r_stream::IO
     w_stream::IO
@@ -135,7 +135,7 @@ mutable struct Worker
         if haskey(map_pid_wrkr, id)
             return map_pid_wrkr[id]
         end
-        w=new(id, Threads.ReentrantLock(), [], [], false, W_CREATED, Condition(), time(), conn_func)
+        w=new(id, Threads.ReentrantLock(), [], [], false, W_CREATED, Threads.Condition(), time(), conn_func)
         w.initialized = Event()
         register_worker(w; role = role)
         w
@@ -147,12 +147,14 @@ end
 wid(w::Worker; role= :default) = w.id
 
 function set_worker_state(w, state)
-    w.state = state
-    notify(w.c_state; all=true)
+    lock(w.c_state) do
+        @atomic w.state = state
+        notify(w.c_state; all=true)
+    end
 end
 
 function check_worker_state(w::Worker; role= :default)
-    if w.state === W_CREATED
+    if (@atomic w.state) === W_CREATED
         if !isclusterlazy(role = role)
             pg = PGRP(role = role)
             if pg.topology === :all_to_all
@@ -174,6 +176,7 @@ function check_worker_state(w::Worker; role= :default)
             wait_for_conn(w; role=role)
         end
     end
+    return nothing
 end
 
 exec_conn_func(id::Int; role= :default) = exec_conn_func(worker_from_id(id; role = role)::Worker; role = role)
@@ -191,13 +194,15 @@ function exec_conn_func(w::Worker; role= :default)
 end
 
 function wait_for_conn(w; role=:defaut)
-    if w.state === W_CREATED
+    if (@atomic w.state) === W_CREATED
         timeout =  worker_timeout() - (time() - w.ct_time)
         timeout <= 0 && error("peer $(wid(w, role=role)) has not connected to $(myid(role=role))")
 
-        @async (sleep(timeout); notify(w.c_state; all=true))
-        wait(w.c_state)
-        w.state === W_CREATED && error("peer $(wid(w, role=role)) didn't connect to $(myid(role=role)) within $timeout seconds")
+        if timedwait(() -> (@atomic w.state) === W_CONNECTED, timeout) === :timed_out
+            # Notify any waiters on the state and throw
+            @lock w.c_state notify(w.c_state)
+            error("peer $(w.id) didn't connect to $(myid()) within $timeout seconds")
+        end
     end
     nothing
 end
@@ -515,19 +520,24 @@ function addprocs_locked(manager::ClusterManager; kwargs...)
     # call manager's `launch` is a separate task. This allows the master
     # process initiate the connection setup process as and when workers come
     # online
+    # NOTE: Must be `@async`. See FIXME above
     t_launch = @async launch(manager, params, launched, launch_ntfy)
 
     @sync begin
         while true
             if isempty(launched)
                 istaskdone(t_launch) && break
-                @async (sleep(1); notify(launch_ntfy))
+                @async begin # NOTE: Must be `@async`. See FIXME above
+                    sleep(1)
+                    notify(launch_ntfy)
+                end
                 wait(launch_ntfy)
             end
 
             if !isempty(launched)
                 wconfig = popfirst!(launched)
                 let wconfig=wconfig
+                    # NOTE: Must be `@async`. See FIXME above
                     @async setup_launched_worker(manager, wconfig, launched_q)
                 end
             end
@@ -678,7 +688,12 @@ function create_worker(manager, wconfig)
         # require the value of config.connect_at which is set only upon connection completion
         for jw in pgm.workers
             if (wid(jw, role=role) != 1) && (wid(jw, role=role) < wid(w, role=role))
-                (jw.state === W_CREATED) && wait(jw.c_state)
+                # wait for wl to join
+                if (@atomic jw.state) === W_CREATED
+                    lock(jw.c_state) do
+                        wait(jw.c_state)
+                    end
+                end
                 push!(join_list, jw)
             end
         end
@@ -701,7 +716,12 @@ function create_worker(manager, wconfig)
         end
 
         for wl in wlist
-            (wl.state === W_CREATED) && wait(wl.c_state)
+            lock(wl.c_state) do
+                if (@atomic wl.state) === W_CREATED
+                    # wait for wl to join
+                    wait(wl.c_state)
+                end
+            end
             push!(join_list, wl)
         end
     end
@@ -716,11 +736,9 @@ function create_worker(manager, wconfig)
     send_msg_now(w, MsgHeader(RRID(0,0), ntfy_oid), join_message; role = role)
 
     @async manage(w.manager, wid(w, role=role), w.config, :register)
+    
     # wait for rr_ntfy_join with timeout
-    timedout = false
-    @async (sleep($timeout); timedout = true; put!(rr_ntfy_join, 1))
-    wait(rr_ntfy_join)
-    if timedout
+    if timedwait(() -> isready(rr_ntfy_join), timeout) === :timed_out
         error("worker did not connect within $timeout seconds")
     end
     lock(client_refs) do
@@ -762,24 +780,21 @@ function redirect_output_from_additional_worker(pid, port)
 end
 
 function check_master_connect()
-    timeout = worker_timeout() * 1e9
     # If we do not have at least process 1 connect to us within timeout
     # we log an error and exit, unless we're running on valgrind
     if ccall(:jl_running_on_valgrind,Cint,()) != 0
         return
     end
-    @async begin
-        map_pid_wrkr = Map_pid_wrkr(role = :worker)
-        start = time_ns()
-        while !haskey(map_pid_wrkr, 1) && (time_ns() - start) < timeout
-            sleep(1.0)
-        end
-
-        if !haskey(map_pid_wrkr, 1)
-            print(stderr, "Master process (id 1) could not connect within $(timeout/1e9) seconds.\nexiting.\n")
-            exit(1)
-        end
+    errormonitor(
+        @async begin
+            map_pid_wrkr = Map_pid_wrkr(role = :worker)
+            timeout = worker_timeout()
+            if timedwait(() -> haskey(map_pid_wrkr, 1), timeout) === :timed_out
+                print(stderr, "Master process (id 1) could not connect within $(timeout) seconds.\nexiting.\n")
+                exit(1)
+            end
     end
+    )
 end
 
 
@@ -985,7 +1000,7 @@ function nprocs(; role= :default)
         n = length(pg.workers)
         # filter out workers in the process of being setup/shutdown.
         for jw in pg.workers
-            if !isa(jw, LocalProcess) && (jw.state !== W_CONNECTED)
+            if !isa(jw, LocalProcess) && ((@atomic jw.state) !== W_CONNECTED)
                 n = n - 1
             end
         end
@@ -1037,7 +1052,7 @@ function procs(; role= :default)
     pg = PGRP(role = role)
     if myid(role=role) == 1 || (pg.topology === :all_to_all  && !isclusterlazy(role = role))
         # filter out workers in the process of being setup/shutdown.
-        return Int[wid(x, role=role) for x in pg.workers if isa(x, LocalProcess) || (x.state === W_CONNECTED)]
+        return Int[wid(x, role=role) for x in pg.workers if isa(x, LocalProcess) || ((@atomic x.state) === W_CONNECTED)]
     else
         return Int[wid(x, role=role) for x in pg.workers]
     end
@@ -1047,7 +1062,7 @@ function id_in_procs(id0; role= :default)  # faster version of `id in procs()`
     pg = PGRP(role = role)
     if myid(role=role) == 1 || (pg.topology === :all_to_all  && !isclusterlazy(role = role))
         for x in pg.workers
-            if (wid(x, role=role)::Int) == id0 && (isa(x, LocalProcess) || (x::Worker).state === W_CONNECTED)
+            if (wid(x, role=role)::Int) == id0 && (isa(x, LocalProcess) || (@atomic (x::Worker).state) === W_CONNECTED)
                 return true
             end
         end
@@ -1070,7 +1085,7 @@ Specifically all workers bound to the same ip-address as `pid` are returned.
 function procs(pid::Integer; role= :default)
     if myid(role = role) == 1
         map_pid_wrkr = Map_pid_wrkr(role = role)
-        all_workers = [x for x in PGRP(role = role).workers if isa(x, LocalProcess) || (x.state === W_CONNECTED)]
+        all_workers = [x for x in PGRP(role = role).workers if isa(x, LocalProcess) || ((@atomic x.state) === W_CONNECTED)]
         if (pid == 1) || (isa(map_pid_wrkr[pid].manager, LocalManager))
             Int[wid(x, role=role) for x in filter(w -> (wid(w, role=role)==1) || (isa(w.manager, LocalManager)), all_workers)]
         else
@@ -1178,11 +1193,11 @@ function _rmprocs(pids, role, waitfor)
 
         start = time_ns()
         while (time_ns() - start) < waitfor*1e9
-            all(w -> w.state === W_TERMINATED, rmprocset) && break
+            all(w -> (@atomic w.state) === W_TERMINATED, rmprocset) && break
             sleep(min(0.1, waitfor - (time_ns() - start)/1e9))
         end
 
-        unremoved = [wid(wrkr, role=role) for wrkr in filter(w -> w.state !== W_TERMINATED, rmprocset)]
+        unremoved = [wid(wrkr, role=role) for wrkr in filter(w -> (@atomic w.state) !== W_TERMINATED, rmprocset)]
         if length(unremoved) > 0
             estr = string("rmprocs: pids ", unremoved, " not terminated after ", waitfor, " seconds.")
             throw(ErrorException(estr))
@@ -1482,18 +1497,16 @@ end
 
 using Random: randstring
 
-let inited = false
-    # do initialization that's only needed when there is more than 1 processor
-    global function init_multi()
-        if !inited
-            inited = true
-            push!(Base.package_callbacks, _require_callback)
-            atexit(() -> terminate_all_workers(role = :master))                           # TO CHECK (role argument ???)
-            init_bind_addr()
-            cluster_cookie(randstring(HDR_COOKIE_LEN))
-        end
-        return nothing
+# do initialization that's only needed when there is more than 1 processor
+const inited = Threads.Atomic{Bool}(false)
+function init_multi()
+    if !Threads.atomic_cas!(inited, false, true)
+        push!(Base.package_callbacks, _require_callback)
+        atexit(terminate_all_workers)
+        init_bind_addr()
+        cluster_cookie(randstring(HDR_COOKIE_LEN))
     end
+    return nothing
 end
 
 function init_parallel()

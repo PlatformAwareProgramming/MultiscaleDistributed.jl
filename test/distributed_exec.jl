@@ -3,6 +3,8 @@
 using Test, Distributed, Random, Serialization, Sockets
 import Distributed: launch, manage
 
+pathsep = Sys.iswindows() ? ";" : ":"
+
 @test cluster_cookie() isa String
 
 include(joinpath(Sys.BINDIR, "..", "share", "julia", "test", "testenv.jl"))
@@ -171,27 +173,6 @@ function poll_while(f::Function; timeout_seconds::Integer = 120)
     return true
 end
 
-function _getenv_include_thread_unsafe()
-    environment_variable_name = "JULIA_TEST_INCLUDE_THREAD_UNSAFE"
-    default_value = "false"
-    environment_variable_value = strip(get(ENV, environment_variable_name, default_value))
-    b = parse(Bool, environment_variable_value)::Bool
-    return b
-end
-const _env_include_thread_unsafe = _getenv_include_thread_unsafe()
-function include_thread_unsafe_tests()
-    if Threads.maxthreadid() > 1
-        if _env_include_thread_unsafe
-            return true
-        end
-        msg = "Skipping a thread-unsafe test because `Threads.maxthreadid() > 1`"
-        @warn msg Threads.maxthreadid()
-        Test.@test_broken false
-        return false
-    end
-    return true
-end
-
 # Distributed GC tests for Futures
 function test_futures_dgc(id)
     f = remotecall(myid, id)
@@ -248,28 +229,43 @@ put!(f, :OK)
 @test fetch(f) === :OK
 
 # RemoteException should be thrown on a put! when another process has set the value
-f = Future(wid1)
-fid = remoteref_id(f)
+# Test this multiple times as races have been seen where `@spawn` was used over
+# `@async`. Issue #124
+max_attempts = 100
+for i in 1:max_attempts
+    let f = Future(wid1), fid = remoteref_id(f), fstore = RemoteChannel(wid2)
+        # RemoteException should be thrown on a put! when another process has set the value
 
-fstore = RemoteChannel(wid2)
-put!(fstore, f) # send f to wid2
-put!(f, :OK) # set value from master
+        put!(fstore, f) # send f to wid2
+        put!(f, :OK) # set value from master
 
-@test remotecall_fetch(k->haskey(Distributed.PGRP().refs, k), wid1, fid) == true
+        @test remotecall_fetch(k->haskey(Distributed.PGRP().refs, k), wid1, fid) == true
 
-testval = remotecall_fetch(wid2, fstore) do x
-    try
-        put!(fetch(x), :OK)
-        return 0
-    catch e
-        if isa(e, RemoteException)
-            return 1
-        else
-            return 2
+        # fstore should be ready immediately, but races due to use of `@spawn` have caused
+        # this to fail in the past. So we poll for readiness before the main test after this
+        # which internally checks for `isready` to decide whether to error or not
+        w = remotecall_fetch(wid2, fstore) do x
+            timedwait(() -> isready(fetch(x)), 10)
         end
+        w == :ok || @info "isready timed out on attempt $i (max $max_attempts)"
+        @test w == :ok
+        # This is the actual test. It should fail because the value is already set remotely
+        testval = remotecall_fetch(wid2, fstore) do x
+            try
+                put!(fetch(x), :OK)
+                return 0
+            catch e
+                if isa(e, RemoteException)
+                    return 1
+                else
+                    rethrow()
+                end
+            end
+        end
+        testval == 1 || @info "test failed on attempt $i (max $max_attempts)"
+        @test testval == 1
     end
 end
-@test testval == 1
 
 # Issue number #25847
 @everywhere function f25847(ref)
@@ -315,14 +311,16 @@ let wid1 = workers()[1],
     fstore = RemoteChannel(wid2)
 
     put!(fstore, rr)
-    if include_thread_unsafe_tests()
-        @test remotecall_fetch(k -> haskey(Distributed.PGRP().refs, k), wid1, rrid) == true
-    end
+
+    # timedwait() is necessary because wid1 is asynchronously informed of
+    # the existence of rr/rrid through the call to `put!(fstore, rr)`.
+    @test timedwait(() -> remotecall_fetch(k -> haskey(Distributed.PGRP().refs, k), wid1, rrid), 10) === :ok
+
     finalize(rr) # finalize locally
     yield() # flush gc msgs
-    if include_thread_unsafe_tests()
-        @test remotecall_fetch(k -> haskey(Distributed.PGRP().refs, k), wid1, rrid) == true
-    end
+
+    @test timedwait(() -> remotecall_fetch(k -> haskey(Distributed.PGRP().refs, k), wid1, rrid), 10) === :ok
+
     remotecall_fetch(r -> (finalize(take!(r)); yield(); nothing), wid2, fstore) # finalize remotely
     sleep(0.5) # to ensure that wid2 messages have been executed on wid1
     @test poll_while(() -> remotecall_fetch(k -> haskey(Distributed.PGRP().refs, k), wid1, rrid))
@@ -515,6 +513,17 @@ let ch = RemoteChannel(() -> Channel(1))
     ch = RemoteChannel(() -> Channel(1))
     @spawnat id_other test_iteration_put(ch, 10)
     @test 10 == test_iteration_collect(ch)
+end
+
+# Test isempty(::RemoteChannel). This should not modify the underlying
+# AbstractChannel, which Base's default implementation will do.
+let
+    chan = Channel(1)
+    push!(chan, 1)
+    remotechan = RemoteChannel(() -> chan)
+    @test !isempty(remotechan)
+    # Calling `isempty(remotechan)` shouldn't have modified `chan`
+    @test !isempty(chan)
 end
 
 # make sure exceptions propagate when waiting on Tasks
@@ -727,6 +736,8 @@ wp = WorkerPool(workers())
 @test nworkers() == length(unique(remotecall_fetch(wp->pmap(_->myid(), wp, 1:100), id_other, wp)))
 wp = WorkerPool(2:3)
 @test sort(unique(pmap(_->myid(), wp, 1:100))) == [2,3]
+@test fetch(remotecall(myid, wp)) in wp.workers
+@test_throws RemoteException fetch(remotecall(error, wp))
 
 # wait on worker pool
 wp = WorkerPool(2:2)
@@ -753,6 +764,8 @@ status = timedwait(() -> isready(f), 10)
 # CachingPool tests
 wp = CachingPool(workers())
 @test [1:100...] == pmap(x->x, wp, 1:100)
+@test fetch(remotecall(myid, wp)) in wp.workers
+@test_throws RemoteException fetch(remotecall(error, wp))
 
 clear!(wp)
 @test length(wp.map_obj2ref) == 0
@@ -1020,13 +1033,14 @@ wid0 = workers()[1]
     remotecall_fetch(()->T16091, wid0)
     false
 catch ex
-    ((ex::RemoteException).captured::CapturedException).ex === UndefVarError(:T16091)
+    @info "----------------- $(((ex::RemoteException).captured::CapturedException).ex)"
+    ((ex::RemoteException).captured::CapturedException).ex === UndefVarError(:T16091, Main)
 end
 @test try
     remotecall_fetch(identity, wid0, T16091)
     false
 catch ex
-    ((ex::RemoteException).captured::CapturedException).ex === UndefVarError(:T16091)
+    ((ex::RemoteException).captured::CapturedException).ex === UndefVarError(:T16091, Main)
 end
 
 f16091a() = 1
@@ -1095,6 +1109,23 @@ let
     @test remotecall_fetch(()->:test,2) === :test
     ref = remotecall(bad_thunk, 2)
     @test_throws RemoteException fetch(ref)
+end
+
+# Test the behaviour of remotecall(f, ::AbstractWorkerPool), this should
+# keep the worker out of the pool until the underlying remotecall has
+# finished.
+for PoolType in (WorkerPool, CachingPool)
+    let
+        remotechan = RemoteChannel(wrkr1)
+        pool = PoolType([wrkr1])
+        put_future = remotecall(() -> wait(remotechan), pool)
+        @test !isready(pool)
+        put!(remotechan, 1)
+        wait(put_future)
+        # The task that waits on the future to put it back into the pool runs
+        # asynchronously so we use timedwait() to check when the worker is back in.
+        @test timedwait(() -> isready(pool), 10) === :ok
+    end
 end
 
 # Test calling @everywhere from a module not defined on the workers
@@ -1756,18 +1787,17 @@ function reuseport_tests(;role = :default)
     end
 
     # Ensure that the code has indeed been successfully executed everywhere
-    @test all(in(results), procs())
+    return all(in(results), procs())
 end
 
 # Test that the client port is reused. SO_REUSEPORT may not be supported on
 # all UNIX platforms, Linux kernels prior to 3.9 and older versions of OSX
 @assert nprocs() == 1
 addprocs_with_testenv(4; lazy=false)
-if ccall(:jl_has_so_reuseport, Int32, ()) == 1
-    reuseport_tests()
-else
-    @info "SO_REUSEPORT is unsupported, skipping reuseport tests"
-end
+
+skip_reuseexport = ccall(:jl_has_so_reuseport, Int32, ()) != 1
+skip_reuseexport && @debug "SO_REUSEPORT support missing, reuseport_tests skipped"
+@test reuseport_tests() skip = skip_reuseexport
 
 # issue #27933
 a27933 = :_not_defined_27933
@@ -1841,9 +1871,10 @@ let julia = `$(Base.julia_cmd()) --startup-file=no`; mktempdir() do tmp
     project = mkdir(joinpath(tmp, "project"))
     depots = [mkdir(joinpath(tmp, "depot1")), mkdir(joinpath(tmp, "depot2"))]
     load_path = [mkdir(joinpath(tmp, "load_path")), "@stdlib", "@"]
-    pathsep = Sys.iswindows() ? ";" : ":"
+    shipped_depots = DEPOT_PATH[2:end] # stdlib caches
     env = Dict(
-        "JULIA_DEPOT_PATH" => join(depots, pathsep),
+        # needs a trailing pathsep to access the stdlib depot
+        "JULIA_DEPOT_PATH" => join(depots, pathsep) * pathsep,
         "JULIA_LOAD_PATH" => join(load_path, pathsep),
         # Explicitly propagate `TMPDIR`, in the event that we're running on a
         # CI system where `TMPDIR` is special.
@@ -1873,7 +1904,7 @@ let julia = `$(Base.julia_cmd()) --startup-file=no`; mktempdir() do tmp
     end
     """
     cmd = setenv(`$(julia) -p1 -e $(testcode * extracode)`, env)
-    @test success(cmd)
+    @test success(pipeline(cmd; stdout, stderr))
     # --project
     extracode = """
     for w in workers()
@@ -1882,11 +1913,11 @@ let julia = `$(Base.julia_cmd()) --startup-file=no`; mktempdir() do tmp
     end
     """
     cmd = setenv(`$(julia) --project=$(project) -p1 -e $(testcode * extracode)`, env)
-    @test success(cmd)
+    @test success(pipeline(cmd; stdout, stderr))
     # JULIA_PROJECT
     cmd = setenv(`$(julia) -p1 -e $(testcode * extracode)`,
                  (env["JULIA_PROJECT"] = project; env))
-    @test success(cmd)
+    @test success(pipeline(cmd; stdout, stderr))
     # Pkg.activate(...)
     activateish = """
     Base.ACTIVE_PROJECT[] = $(repr(project))
@@ -1894,11 +1925,17 @@ let julia = `$(Base.julia_cmd()) --startup-file=no`; mktempdir() do tmp
     addprocs(1)
     """
     cmd = setenv(`$(julia) -e $(activateish * testcode * extracode)`, env)
-    @test success(cmd)
+    @test success(pipeline(cmd; stdout, stderr))
     # JULIA_(LOAD|DEPOT)_PATH
     shufflecode = """
-    d = reverse(DEPOT_PATH)
-    append!(empty!(DEPOT_PATH), d)
+    function reverse_first_two(depots)
+        custom_depots = depots[1:2]
+        standard_depots = depots[3:end]
+        custom_depots = reverse(custom_depots)
+        return append!(custom_depots, standard_depots)
+    end
+    new_depots = reverse_first_two(DEPOT_PATH)
+    append!(empty!(DEPOT_PATH), new_depots)
     l = reverse(LOAD_PATH)
     append!(empty!(LOAD_PATH), l)
     """
@@ -1913,23 +1950,23 @@ let julia = `$(Base.julia_cmd()) --startup-file=no`; mktempdir() do tmp
     end
     """
     cmd = setenv(`$(julia) -e $(shufflecode * addcode * testcode * extracode)`, env)
-    @test success(cmd)
+    @test success(pipeline(cmd; stdout, stderr))
     # Mismatch when shuffling after proc addition
     failcode = shufflecode * setupcode * """
     for w in workers()
         @test remotecall_fetch(load_path, w) == reverse(LOAD_PATH) == $(repr(load_path))
-        @test remotecall_fetch(depot_path, w) == reverse(DEPOT_PATH) == $(repr(depots))
+        @test remotecall_fetch(depot_path, w) == $(repr(vcat(reverse(depots), shipped_depots)))
     end
     """
     cmd = setenv(`$(julia) -p1 -e $(failcode)`, env)
-    @test success(cmd)
+    @test success(pipeline(cmd; stdout, stderr))
     # Passing env or exeflags to addprocs(...) to override defaults
     envcode = """
     using Distributed
     project = mktempdir()
     env = Dict(
         "JULIA_LOAD_PATH" => string(LOAD_PATH[1], $(repr(pathsep)), "@stdlib"),
-        "JULIA_DEPOT_PATH" => DEPOT_PATH[1],
+        "JULIA_DEPOT_PATH" => DEPOT_PATH[1] * $(repr(pathsep)),
         "TMPDIR" => ENV["TMPDIR"],
     )
     addprocs(1; env = env, exeflags = `--project=\$(project)`)
@@ -1937,14 +1974,14 @@ let julia = `$(Base.julia_cmd()) --startup-file=no`; mktempdir() do tmp
     addprocs(1; env = env)
     """ * setupcode * """
     for w in workers()
-        @test remotecall_fetch(depot_path, w)          == [DEPOT_PATH[1]]
+        @test remotecall_fetch(depot_path, w)          == vcat(DEPOT_PATH[1], $(repr(shipped_depots)))
         @test remotecall_fetch(load_path, w)           == [LOAD_PATH[1], "@stdlib"]
         @test remotecall_fetch(active_project, w)      == project
         @test remotecall_fetch(Base.active_project, w) == joinpath(project, "Project.toml")
     end
     """
     cmd = setenv(`$(julia) -e $(envcode)`, env)
-    @test success(cmd)
+    @test success(pipeline(cmd; stdout, stderr))
 end end
 
 include("splitrange.jl")
@@ -1960,7 +1997,7 @@ begin
 
     # Next, ensure we get a log message when a worker does not cleanly exit
     w = only(addprocs(1))
-    @test_logs (:warn, r"sending SIGQUIT") begin
+    @test_logs (:warn, r"Sending SIGQUIT") match_mode=:any begin
         remote_do(w) do
             # Cause the 'exit()' message that `rmprocs()` sends to do nothing
             Core.eval(Base, :(exit() = nothing))
@@ -1973,7 +2010,10 @@ end
 
 # Run topology tests last after removing all workers, since a given
 # cluster at any time only supports a single topology.
-nprocs() > 1 && rmprocs(workers())
+if nprocs() > 1
+    rmprocs(workers())
+end
+include("threads.jl") 
 include("topology.jl")
 
 

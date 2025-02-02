@@ -194,7 +194,7 @@ end
 function flush_gc_msgs(; role= :default)
     try
         for w in (PGRP(role = role)::ProcessGroup).workers
-            if isa(w,Worker) && (w.state == W_CONNECTED) && w.gcflag
+            if isa(w,Worker) && ((@atomic w.state) == W_CONNECTED) && w.gcflag
                 flush_gc_msgs(w; role = role)
             end
         end

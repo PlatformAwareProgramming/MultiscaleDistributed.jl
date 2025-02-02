@@ -275,7 +275,7 @@ end
 const any_gc_flag = Threads.Condition()
 function start_gc_msgs_task(; role= :default)
     errormonitor(
-        Threads.@spawn begin
+        @async begin
             while true
                 lock(any_gc_flag) do
                     # this might miss events
@@ -323,7 +323,7 @@ function process_worker(rr; role= :default)
     msg = (remoteref_id(rr), myid(role = role))
 
     # Needs to acquire a lock on the del_msg queue
-    T = Threads.@spawn begin
+    T = @async begin
         publish_del_msg!($w, $msg)
     end
     Base.errormonitor(T)
@@ -451,7 +451,7 @@ remotecall(f, id::Integer, args...; role= :default, kwargs...) =
             remotecall(f, worker_from_id(id; role = role), args...; role = role, kwargs...)
 
 function remotecall_fetch(f, w::LocalProcess, args...; role= :default, kwargs...)
-    v=run_work_thunk(local_remotecall_thunk(f,args, kwargs), false; role = role)
+    v=run_work_thunk(local_remotecall_thunk(f, args, kwargs), false; role = role)
     return isa(v, RemoteException) ? throw(v) : v
 end
 
@@ -815,6 +815,9 @@ close(rr::RemoteChannel; role= :default) = call_on_owner(close_ref, rr; role = r
 
 isopen_ref(rid; role= :default) = isopen(lookup_ref(rid; role = role).c)
 isopen(rr::RemoteChannel; role= :default) = call_on_owner(isopen_ref, rr; role = role)
+
+isempty_ref(rid; role= :default) = isempty(lookup_ref(rid; role = role).c)
+Base.isempty(rr::RemoteChannel; role= :default) = call_on_owner(isempty_ref, rr; role=role)
 
 getindex(r::RemoteChannel; role= :default) = fetch(r; role = role)
 getindex(r::Future; role= :default) = fetch(r; role = role)
