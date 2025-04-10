@@ -1,5 +1,5 @@
-name = "Distributed"
-uuid = "8ba89e20-285c-5b6f-9357-94700520ee1b"
+name = "MultiscaleDistributed"
+uuid = "1faa63fc-8c3f-4a14-9d2b-e872e5bbb821"
 version = "1.11.0"
 
 [deps]
