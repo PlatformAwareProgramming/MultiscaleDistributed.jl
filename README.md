@@ -1,4 +1,25 @@
-# Distributed (with a multiscale parallelism extension)
+# MultiscaleDistributed.jl
+## A Distributed.jl extension, adding multiscale processes
+
+The `MultiscaleDistributed` package is a fork from the standard `Distributed` package,
+inheriting all its functionalities. It extends `Distributed` with _multiscale parallelism_,
+making it possible for worker processes to create processes. 
+In gross terms, worker processes can invoke `addprocs` successfully, so that a worker
+process may also play the role of master process with 
+respect to the set of worker processes it created. For that, 
+all `Distributed` operations are extended with a keyword parameter `role`, 
+with three possible values: `:default` (default argument), `:master`, and `:worker`. 
+So, a worker that created processes by means of `addprocs` may execute operations as:
+* a ***worker process*** by using `role = :worker`, for interacting with the master
+  processes that created it, as well as other workers; or
+* a ***master process*** by using `role = :master`, for interacting with the workers it created.
+
+The first use case of mutiscale processes in Julia is helping programmers deploy 
+_multicluster computations_, i.e. parallel computations employing multiple clusters, 
+where the parallel programming patterns and tools at the multicluster and cluster levels 
+differ. 
+
+# Distributed.jl
 
 The `Distributed` package provides functionality for creating and controlling
 multiple Julia processes remotely, and for performing distributed and parallel
@@ -12,9 +33,7 @@ the processes within a cluster. See the `API` section for details.
 This package ships as part of the Julia stdlib.
 
 > [!NOTE]
-> This repository is a fork of the original [`Distributed`](https://github.com/JuliaLang/Distributed.jl) package for developing ideas behind the support of _multiscale parallelism_ in Julia. In gross terms, such an extension allows worker processes to execute the `addprocs` operation, so that a worker process may also play the role of a master process with respect to a set of worker processes it creates by invoking `addprocs`. For that, all `Distributed` operations listed below are extended with a keyword parameter `role`, with three possible values: `:default` (default argument), `:master`, and `:worker`. So, a worker that created processes by means of `addprocs` may execute operations as:
-> * a ***worker process*** by using `role = :worker`, for interacting with the master processes that created it, as well as other workers; or
-> * a ***master process*** by using `role = :master`, for interacting with the workers it created.
+> This repository is a fork of the original [`Distributed`](https://github.com/JuliaLang/Distributed.jl) package for developing ideas behind the support of _multiscale parallelism_ in Julia. 
 >
 > It is important to note that the modifications to the API do not affect usual `Distributed` programs.
 >   
